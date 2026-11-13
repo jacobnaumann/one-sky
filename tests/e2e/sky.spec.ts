@@ -25,7 +25,7 @@ test('two visitors see each other, wave, wave back, and a third sees their threa
   // presence
   await expect.poll(() => a.evaluate((id) => (window as any).__onesky.sky.people.has(id), ub)).toBe(true);
   await expect.poll(() => b.evaluate((id) => (window as any).__onesky.sky.people.has(id), ua)).toBe(true);
-  await expect(a.locator('#census')).toContainText('lights awake');
+  await expect(a.locator('#census')).toContainText('lights here now');
   await expect(a.locator('#you-place')).toContainText('Tokyo');
   await expect(b.locator('#you-place')).toContainText('Lisbon');
 
@@ -58,7 +58,7 @@ test('two visitors see each other, wave, wave back, and a third sees their threa
   // a third visitor arriving later sees the thread from the database
   const c = await visitor(browser, 'America/Sao_Paulo');
   await expect.poll(() => c.evaluate((ids) => ids.some((id: string) => (window as any).__onesky.threads.has(id)), threadsA)).toBe(true);
-  await expect(c.locator('#census')).toContainText('3 lights awake');
+  await expect(c.locator('#census')).toContainText('3 lights here now');
 
   // when B leaves, A sees the light go out
   await b.context().close();

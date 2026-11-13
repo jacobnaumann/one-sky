@@ -435,3 +435,32 @@ body:has(.scrim) :is(.ask, .you, .world, .tools) { opacity: 0; pointer-events: n
   .stats { gap: 16px; }
   .ask-actions { flex-wrap: wrap; }
 }
+
+/* ───────── after the first-time-visitor review ───────── */
+.card-close { z-index: 2; }
+.toast-actions { display: inline-flex; gap: 8px; flex-shrink: 0; }
+.toast-close { width: 30px; height: 30px; border-radius: 50%; color: var(--faint); font-size: 18px; line-height: 1; flex-shrink: 0; margin: 0 -4px 0 -6px; }
+.toast-close:hover { color: var(--ink); background: rgba(255, 255, 255, 0.08); }
+.feed { pointer-events: none; }
+.feed li.go { pointer-events: auto; cursor: pointer; animation: feed-in 0.7s var(--ease) forwards, feed-out 1.2s ease 14.5s forwards; }
+.feed li.go::after { content: ' →'; color: var(--amber); }
+.feed li.go:hover b { text-decoration: underline; text-underline-offset: 3px; }
+#census.go { cursor: pointer; }
+#census.go:hover b { text-decoration: underline; text-underline-offset: 3px; }
+.tool-label { font-size: 13.5px; font-weight: 550; display: none; }
+@media (min-width: 1180px) {
+  #btn-day, #btn-postcard { width: auto; padding: 0 16px 0 12px; border-radius: 999px; gap: 7px; display: inline-flex; align-items: center; }
+  .tool-label { display: inline; }
+}
+@media (max-width: 1000px) {
+  .app::before { background: radial-gradient(120% 90% at 50% 50%, transparent 55%, rgba(0, 0, 0, 0.55) 100%), linear-gradient(to top, #000 0, rgba(0, 0, 0, 0.92) 17%, transparent 36%), linear-gradient(to bottom, rgba(0, 0, 0, 0.45), transparent 18%); }
+  .you .feed li { white-space: normal; }
+  .toast-actions { flex-wrap: wrap; }
+}
+
+@media (max-width: 1000px) {
+  /* the census line may run under the toolbar's row without pushing the buttons off-screen */
+  .brand { min-width: 0; flex: 0 1 auto; }
+  .brand p { width: 0; overflow: visible; }
+  .tools { flex-shrink: 0; }
+}

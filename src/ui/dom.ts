@@ -66,31 +66,48 @@ export function modal(build: (close: () => void) => HTMLElement, opts: { label: 
 export const isModalOpen = () => openModal !== null;
 
 // ───────── toasts ─────────
-export function toast(content: Node, opts: { ms?: number; plain?: boolean; action?: { label: string; run: () => void } } = {}): () => void {
+export interface ToastAction { label: string; run: () => void; quiet?: boolean }
+export function toast(content: Node, opts: { ms?: number; plain?: boolean; sticky?: boolean; action?: ToastAction; actions?: ToastAction[] } = {}): () => void {
   const box = $('toasts');
-  const el = h('div', { class: 'toast' + (opts.plain ? ' plain' : ''), role: 'status' }, h('p', {}, content));
+  const el = h('div', { class: 'toast' + (opts.plain ? ' plain' : '') + (opts.sticky ? ' sticky' : ''), role: 'status' }, h('p', {}, content));
   let gone = false;
   const dismiss = () => {
     if (gone) return; gone = true;
     el.classList.add('out');
     setTimeout(() => el.remove(), 500);
   };
-  if (opts.action) {
-    el.append(h('button', { class: 'btn primary small', onclick: () => { opts.action!.run(); dismiss(); } }, opts.action.label));
+  const acts = opts.actions ?? (opts.action ? [opts.action] : []);
+  if (acts.length) {
+    const row = h('span', { class: 'toast-actions' });
+    for (const a of acts) row.append(h('button', { class: `btn small ${a.quiet ? 'ghost' : 'primary'}`, onclick: () => { a.run(); dismiss(); } }, a.label));
+    el.append(row);
   }
+  // a sticky toast stays until it is answered or closed
+  if (opts.sticky) el.append(h('button', { class: 'toast-close', 'aria-label': 'Dismiss', onclick: dismiss }, '×'));
   box.prepend(el);
-  while (box.children.length > 3) box.lastElementChild!.remove();
-  setTimeout(dismiss, opts.ms ?? 6000);
+  // make room by dropping the oldest toast that is not waiting for an answer
+  while (box.children.length > 3) {
+    const old = [...box.children].reverse().find((c) => !c.classList.contains('sticky')) ?? box.lastElementChild!;
+    old.remove();
+  }
+  if (!opts.sticky) setTimeout(dismiss, opts.ms ?? 6000);
   return dismiss;
 }
 
 // ───────── feed ─────────
-export function feed(content: Node, cool = false) {
+/** One line of news. With `go`, the line is a button that takes the visitor there. */
+export function feed(content: Node, cool = false, go?: () => void) {
   const list = $('feed');
-  const li = h('li', { class: cool ? 'cool' : '' }, content);
+  const li = h('li', { class: (cool ? 'cool' : '') + (go ? ' go' : '') }, content);
+  if (go) {
+    li.tabIndex = 0;
+    li.setAttribute('role', 'button');
+    li.addEventListener('click', go);
+    li.addEventListener('keydown', (e) => { if (e.key === 'Enter') go(); });
+  }
   list.append(li);
   while (list.children.length > 4) list.firstElementChild!.remove();
-  setTimeout(() => li.remove(), 10500);
+  setTimeout(() => li.remove(), go ? 16000 : 10500);
 }
 
 /** Count a number up or down to a new value. */

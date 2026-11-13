@@ -349,7 +349,7 @@ export class Globe {
   /** A travelling arc of light from a to b. Resolves when it lands. */
   wave(a: LatLon, b: LatLon): { seconds: number; landed: Promise<void> } {
     const { curve, ang } = this.makeCurve(a, b, 0.22);
-    const seconds = this.opts.reducedMotion ? 0.6 : 1.5 + ang * 0.75;
+    const seconds = this.opts.reducedMotion ? 0.6 : Math.min(3.1, 1.3 + ang * 0.6);
     // never let a flood of waves build unbounded geometry
     if (this.arcs.filter((x) => x.kind === 'wave').length >= 24) return { seconds: 0, landed: Promise.resolve() };
     let done!: () => void;
@@ -434,7 +434,7 @@ export class Globe {
   }
   revealAll() { this.revealTarget = 1; }
 
-  homeDist() { const a = this.aspect(); return a < 0.62 ? 5.3 : a < 0.85 ? 4.3 : 3.3; }
+  homeDist() { const a = this.aspect(); return a < 0.62 ? 6.0 : a < 0.85 ? 4.5 : 3.3; }
   private aspect() { return this.canvas.clientWidth / Math.max(1, this.canvas.clientHeight); }
 
   setYShift(px: number) { this.yShift = px; this.applyViewOffset(); }
@@ -462,7 +462,7 @@ export class Globe {
       if (d < bd) { bd = d; best = { type, id }; }
     };
     for (const l of this.lanterns) test('lantern', l.id, l.lat, l.lon, this.lanternRadius(l.id), 0);
-    for (const l of this.lights) if (l.kind !== 'self') test('light', l.id, l.lat, l.lon, R_LIGHT, l.kind === 'live' ? 60 : -40);
+    for (const l of this.lights) if (l.kind !== 'self') test('light', l.id, l.lat, l.lon, R_LIGHT, l.kind === 'live' ? 1100 : 140);
     return best;
   }
 
