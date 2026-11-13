@@ -103,6 +103,8 @@ export class Globe {
   private pointerNdc: { x: number; y: number } | null = null;
   private ripO = Array.from({ length: 6 }, () => new THREE.Vector3(0, 1, 0));
   private ripT = [-1, -1, -1, -1, -1, -1];
+  /** milliseconds added to the real time when placing the sun (0 = now) */
+  sunOffset = 0;
   private yShift = 0;
   private perfN = 0;
   private perfT = 0;
@@ -300,7 +302,7 @@ export class Globe {
         pts.push(new THREE.Vector3(v[0], v[1], v[2]));
       }
       const curve = new THREE.CatmullRomCurve3(pts);
-      const geo = new THREE.TubeGeometry(curve, 24, 0.0030, 6, false);
+      const geo = new THREE.TubeGeometry(curve, 24, 0.0042, 6, false);
       const mat = new THREE.ShaderMaterial({
         vertexShader: arcVert, fragmentShader: ringFrag,
         uniforms: { uLit: { value: 0 }, uFlash: { value: 0 }, uReveal: { value: 0 } },
@@ -424,7 +426,7 @@ export class Globe {
   }
   revealAll() { this.revealTarget = 1; }
 
-  homeDist() { return this.aspect() < 0.8 ? 5.3 : 3.3; }
+  homeDist() { const a = this.aspect(); return a < 0.62 ? 5.3 : a < 0.85 ? 4.3 : 3.3; }
   private aspect() { return this.canvas.clientWidth / Math.max(1, this.canvas.clientHeight); }
 
   setYShift(px: number) { this.yShift = px; this.applyViewOffset(); }
@@ -527,7 +529,7 @@ export class Globe {
       if (this.pointers.size === 2) {
         const [a, b] = [...this.pointers.values()];
         const d = Math.hypot(a.x - b.x, a.y - b.y);
-        if (this.pinchStart > 0) this.targetDist = clamp(this.pinchDist * (this.pinchStart / d), 1.55, 6.5);
+        if (this.pinchStart > 0) this.targetDist = clamp(this.pinchDist * (this.pinchStart / d), 1.85, 6.5);
         return;
       }
       this.moved += Math.abs(dx) + Math.abs(dy);
@@ -558,7 +560,7 @@ export class Globe {
     el.addEventListener('pointerleave', () => { this.pointerNdc = null; this.onHover(null, { x: 0, y: 0 }); });
     el.addEventListener('wheel', (e) => {
       e.preventDefault();
-      this.targetDist = clamp(this.targetDist * Math.exp(e.deltaY * 0.0011), 1.55, 6.5);
+      this.targetDist = clamp(this.targetDist * Math.exp(e.deltaY * 0.0011), 1.85, 6.5);
       this.lastInput = performance.now();
       this.onUserMove();
     }, { passive: false });
@@ -575,7 +577,7 @@ export class Globe {
   nudge(dLon: number, dLat: number) {
     this.camLon += dLon; this.camLat = clamp(this.camLat + dLat, -84, 84); this.lastInput = performance.now();
   }
-  zoom(f: number) { this.targetDist = clamp(this.targetDist * f, 1.55, 6.5); this.lastInput = performance.now(); }
+  zoom(f: number) { this.targetDist = clamp(this.targetDist * f, 1.85, 6.5); this.lastInput = performance.now(); }
 
   resize() {
     const w = this.canvas.clientWidth || window.innerWidth;
@@ -614,7 +616,8 @@ export class Globe {
 
     // real sun, refreshed every 20 s
     this.sunClock += dt;
-    if (this.sunClock > 20) { this.sunClock = 0; this.setSun(new Date()); }
+    if (this.sunOffset !== 0) this.setSun(new Date(Date.now() + this.sunOffset));
+    else if (this.sunClock > 20) { this.sunClock = 0; this.setSun(new Date()); }
 
     // camera
     if (this.fly) {
@@ -657,7 +660,7 @@ export class Globe {
       const u = this.ringMats[i].uniforms;
       u.uLit.value += ((this.ringLit[i] ? 1 : 0) - u.uLit.value) * (1 - Math.pow(0.02, dt));
       u.uFlash.value *= Math.pow(0.18, dt);
-      u.uReveal.value = dotReveal * (0.22 + 0.78 * clamp((Math.abs(this.camLat) - 3) / 16, 0, 1));
+      u.uReveal.value = dotReveal * clamp((Math.abs(this.camLat) - 2.5) / 14, 0, 1);
     }
 
     for (let i = 0; i < 6; i++) if (this.ripT[i] >= 0) { this.ripT[i] += dt; if (this.ripT[i] > 5.2) this.ripT[i] = -1; }
@@ -747,7 +750,7 @@ export class Globe {
     }
     for (const l of this.lights) {
       const p = latLonToVec3(l.lat, l.lon, R_LIGHT);
-      if (l.kind === 'echo') put(p[0], p[1], p[2], 15, hash01(l.id), KIND.echo, clamp(1 - (l.age ?? 24) / 48, 0, 1));
+      if (l.kind === 'echo') put(p[0], p[1], p[2], 26, hash01(l.id), KIND.echo, clamp(1 - (l.age ?? 24) / 48, 0, 1));
       else put(p[0], p[1], p[2], l.kind === 'self' ? 54 : 38, hash01(l.id), l.kind === 'self' ? KIND.self : KIND.live, 1);
     }
     const teth = this.tetherGeo.getAttribute('position') as THREE.BufferAttribute;

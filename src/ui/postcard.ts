@@ -12,7 +12,9 @@ function loadImage(src: string): Promise<HTMLImageElement> {
 }
 
 export async function makePostcard(shot: string, info: PostcardInfo): Promise<string> {
-  const W = 1600, H = 1000;
+  const img = await loadImage(shot);
+  const portrait = img.height > img.width;
+  const W = portrait ? 1080 : 1600, H = portrait ? 1350 : 1000;
   const c = document.createElement('canvas');
   c.width = W; c.height = H;
   const g = c.getContext('2d')!;
@@ -22,7 +24,6 @@ export async function makePostcard(shot: string, info: PostcardInfo): Promise<st
     await Promise.all([document.fonts.load('400 120px "Instrument Serif"'), document.fonts.load('500 22px "Hanken Grotesk Variable"')]);
   } catch { /* fall back to system fonts */ }
 
-  const img = await loadImage(shot);
   const s = Math.max(W / img.width, H / img.height);
   const dw = img.width * s, dh = img.height * s;
   g.drawImage(img, (W - dw) / 2, (H - dh) / 2, dw, dh);
@@ -42,14 +43,17 @@ export async function makePostcard(shot: string, info: PostcardInfo): Promise<st
 
   g.textBaseline = 'alphabetic';
   g.fillStyle = ink;
-  g.font = `400 108px ${serif}`;
-  g.fillText('One Sky', M, M + 84);
+  g.font = `400 ${portrait ? 92 : 108}px ${serif}`;
+  g.fillText('One Sky', M, M + (portrait ? 70 : 84));
 
   const date = new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
   const time = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'UTC' });
   g.font = `500 21px ${sans}`;
   g.fillStyle = dim;
-  spaced(g, `${date.toUpperCase()}  ·  ${time} UTC  ·  SEEN FROM ${info.place.toUpperCase()}`, M + 4, M + 128, 2.6);
+  if (portrait) {
+    spaced(g, `${date.toUpperCase()}  ·  ${time} UTC`, M + 4, M + 108, 2.6);
+    spaced(g, `SEEN FROM ${info.place.toUpperCase()}`, M + 4, M + 138, 2.6);
+  } else spaced(g, `${date.toUpperCase()}  ·  ${time} UTC  ·  SEEN FROM ${info.place.toUpperCase()}`, M + 4, M + 128, 2.6);
 
   // numbers, bottom left
   const cols: [string, string][] = [
@@ -59,14 +63,16 @@ export async function makePostcard(shot: string, info: PostcardInfo): Promise<st
     [Math.round(info.km).toLocaleString('en-US'), 'km connected'],
   ];
   let x = M;
-  for (const [n, label] of cols) {
+  const shown = cols.filter(([n]) => n !== '0').slice(0, portrait ? 2 : 4);
+  const lift = portrait ? 150 : 0; // on a portrait card the question sits below the numbers
+  for (const [n, label] of shown) {
     g.font = `400 76px ${serif}`;
     g.fillStyle = ink;
-    g.fillText(n, x, H - M - 34);
+    g.fillText(n, x, H - M - 34 - lift);
     const w = g.measureText(n).width;
     g.font = `500 17px ${sans}`;
     g.fillStyle = dim;
-    spaced(g, label.toUpperCase(), x + 2, H - M, 2.2);
+    spaced(g, label.toUpperCase(), x + 2, H - M - lift, 2.2);
     x += Math.max(w, measureSpaced(g, label.toUpperCase(), 2.2)) + 64;
   }
 
@@ -74,7 +80,7 @@ export async function makePostcard(shot: string, info: PostcardInfo): Promise<st
   g.textAlign = 'right';
   g.font = `italic 400 34px ${serif}`;
   g.fillStyle = amber;
-  const lines = wrap(g, `“${info.question}”`, 520);
+  const lines = wrap(g, `“${info.question}”`, portrait ? W - 2 * M : 520);
   lines.forEach((ln, i) => g.fillText(ln, W - M, H - M - 34 - (lines.length - 1 - i) * 42));
   g.font = `500 17px ${sans}`;
   g.fillStyle = dim;

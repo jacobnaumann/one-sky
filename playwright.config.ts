@@ -4,6 +4,7 @@ import { defineConfig } from '@playwright/test';
 // ONE_SKY_URL=https://… npm run e2e
 export default defineConfig({
   testDir: 'tests/e2e',
+  outputDir: 'test-results/pw',
   timeout: 120_000,
   expect: { timeout: 30_000 },
   workers: 1,

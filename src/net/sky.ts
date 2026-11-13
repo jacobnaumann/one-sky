@@ -17,7 +17,8 @@ export interface Thread {
   id: string; a_lat: number; a_lon: number; a_place: string; b_lat: number; b_lon: number; b_place: string;
   km: number; created_at: string;
 }
-export interface Echo { lat: number; lon: number; place: string; last_seen: string }
+export interface Echo { eid?: string; lat: number; lon: number; place: string; last_seen: string }
+export interface EchoWave { place: string; tz: string; lat: number; lon: number; created_at: string }
 export interface ZoneDay { day: string; zone: number; place: string; lit_at: string }
 export interface Stats {
   threads_total: number; km_total: number; lanterns_48h: number; lights_today: number; lights_48h: number;
@@ -256,7 +257,21 @@ export class Sky {
     const { data, error } = await this.db.rpc('recent_echoes');
     if (error) return null;
     return ((data as any[]) ?? []).filter((e) => typeof e.lat === 'number' && typeof e.lon === 'number')
-      .map((e) => ({ lat: e.lat, lon: e.lon, place: str(e.place, 60), last_seen: str(e.last_seen, 40) }));
+      .map((e) => ({ eid: typeof e.eid === 'string' && UUID.test(e.eid) ? e.eid : undefined, lat: e.lat, lon: e.lon, place: str(e.place, 60), last_seen: str(e.last_seen, 40) }));
+  }
+  /** Leave a wave for someone who has gone; they receive it when they next arrive. */
+  async waveEcho(eid: string): Promise<void> {
+    const m = this.me;
+    if (!m) throw new Error('not_ready');
+    const { error } = await this.db.rpc('wave_echo', { p_eid: eid, p_lat: m.lat, p_lon: m.lon, p_tz: m.tz });
+    if (error) throw new Error(error.message);
+  }
+  /** Waves left for me while I was away. Delivered once. */
+  async collectEchoWaves(): Promise<EchoWave[]> {
+    const { data, error } = await this.db.rpc('collect_echo_waves');
+    if (error || !Array.isArray(data)) return [];
+    return (data as any[]).filter((w) => w && typeof w.lat === 'number' && typeof w.lon === 'number' && Math.abs(w.lat) <= 90 && Math.abs(w.lon) <= 180)
+      .slice(0, 20).map((w) => ({ place: str(w.place, 60), tz: str(w.tz, 64), lat: w.lat, lon: w.lon, created_at: str(w.created_at, 40) }));
   }
   async zones(day: string): Promise<ZoneDay[]> {
     const { data } = await this.db.from('zone_days').select('day,zone,place,lit_at').eq('day', day);

@@ -53,7 +53,7 @@ const wavedAt = new Map<string, number>();      // uid → when I last waved at 
 const wavedBy = new Map<string, number>();      // uid → when they last waved at me
 let ringWasComplete = false;
 
-const echoKey = (e: Echo) => `echo:${e.lat},${e.lon},${e.place}`;
+const echoKey = (e: Echo) => `echo:${e.eid ?? `${e.lat},${e.lon},${e.place}`}`;
 const echoById = (id: string) => echoes.find((e) => echoKey(e) === id);
 const placeLine = (city: string, country: string) => (country && country !== city ? `${city}, ${country}` : city);
 const skyLine = (lat: number, lon: number, tz: string) => `${localTimeString(tz)} · ${skyState(lat, lon, new Date())}`;
@@ -89,19 +89,53 @@ function refreshLanterns() {
 function renderCensus() {
   const n = liveCount();
   const el = $('census');
-  const sig = `${sky.uid ? 1 : 0}|${n}|${entered}|${stats.lights_48h}`;
+  const sig = `${sky.uid ? 1 : 0}|${n}|${entered}|${stats.lights_48h}|${echoes.length}`;
   if (el.dataset.sig === sig) return;
   el.dataset.sig = sig;
   el.replaceChildren();
   if (!sky.uid) { el.textContent = 'Finding the others…'; return; }
   const live = n === 0 ? 'No lights awake yet' : n === 1 ? (entered ? 'You are the only light awake' : '1 light awake') : `${n} lights awake`;
   el.append(h('b', {}, live));
-  if (stats.lights_48h > 1) el.append(h('span', { class: 'wide' }, ` · ${stats.lights_48h.toLocaleString('en-US')} in the last two days`));
+  if (stats.lights_48h >= 25) el.append(h('span', { class: 'wide' }, ` · ${stats.lights_48h.toLocaleString('en-US')} in the last two days`));
+  else if (echoes.length >= 2) el.append(h('span', { class: 'wide' }, ` · ${echoes.length} echoes of earlier visitors`));
+}
+
+/** A place where the sun is on the horizon right now, if any. */
+function horizonPlace(): { place: Place; rising: boolean } | null {
+  const now = new Date(), soon = new Date(now.getTime() + 6 * 60000);
+  const hits: { place: Place; rising: boolean }[] = [];
+  for (const p of PLACES) {
+    const e = solarElevation(p.lat, p.lon, now);
+    if (Math.abs(e) < 1.2) hits.push({ place: p, rising: solarElevation(p.lat, p.lon, soon) > e });
+  }
+  if (!hits.length) return null;
+  const rising = hits.filter((x) => x.rising);
+  const pool = rising.length ? rising : hits;
+  return pool[Math.floor(now.getTime() / 240000) % pool.length];
+}
+
+/** Minutes until the sun next crosses the horizon at my place, and which way. */
+let sunCache: { at: number; text: string } | null = null;
+function mySunLine(): string {
+  const nowMs = Date.now();
+  if (sunCache && nowMs - sunCache.at < 60000) return sunCache.text;
+  const up = solarElevation(me.lat, me.lon, new Date(nowMs)) > -0.83;
+  let text = '';
+  for (let m = 2; m <= 24 * 60; m += 2) {
+    if ((solarElevation(me.lat, me.lon, new Date(nowMs + m * 60000)) > -0.83) !== up) {
+      const hh = Math.floor(m / 60), mm = m % 60;
+      text = `${up ? 'sunset' : 'sunrise'} in ${hh ? `${hh} h ` : ''}${mm} min`;
+      break;
+    }
+  }
+  sunCache = { at: nowMs, text };
+  return text;
 }
 
 function renderYou() {
   $('you-place').textContent = placeLine(me.city, me.country);
-  $('you-time').textContent = skyLine(me.lat, me.lon, me.tz);
+  const sun = mySunLine();
+  $('you-time').textContent = skyLine(me.lat, me.lon, me.tz) + (sun ? ` · ${sun}` : '');
 }
 
 function renderMine() {
@@ -148,7 +182,7 @@ function ringHint(z: number | null) {
   else if (dark.length === 24) el.textContent = 'A new day. Nobody has lit the ring yet.';
   else {
     const names = dark.sort((a, b) => Math.abs(a - 12) - Math.abs(b - 12)).slice(0, 3).map(zoneCity);
-    el.textContent = `Still dark near ${names.join(', ')}`;
+    el.textContent = `${dark.length} still dark · e.g. ${names.join(', ')}`;
   }
 }
 
@@ -320,11 +354,39 @@ function renderPersonCard(id: string) {
 function renderEchoCard(id: string) {
   const e = echoById(id);
   if (!e) { closeCard(); return; }
+  const left = store.get('onesky.echoWaved') ?? '';
+  const already = !!e.eid && left.includes(e.eid);
+  const note = h('p', { class: 'note' }, already
+    ? 'Your wave is waiting for them. They will see it the next time they arrive.'
+    : e.eid ? 'They have gone — but you can leave a wave. It reaches them the next time they arrive.'
+      : 'They have just gone. Their light lingers here for two days.');
+  const actions = h('div', { class: 'actions' });
+  if (e.eid) {
+    const btn = h('button', { class: 'btn primary', disabled: already }, already ? 'Wave left' : 'Leave a wave');
+    btn.addEventListener('click', async () => {
+      if (!sky.online) { toast(rich(['The sky is out of reach right now. Try again in a moment.']), { plain: true }); return; }
+      btn.disabled = true; btn.textContent = 'Wave left';
+      const { seconds } = globe.wave(me, e);
+      audio.waveOut(me.lon, e.lon, seconds);
+      try {
+        await sky.waveEcho(e.eid!);
+        store.set('onesky.echoWaved', (left + ',' + e.eid).slice(-2000));
+        note.textContent = 'Your wave is waiting for them. They will see it the next time they arrive.';
+        feed(rich(['You left a wave in ', { b: e.place }]));
+      } catch (err: any) {
+        btn.disabled = false; btn.textContent = 'Leave a wave';
+        note.textContent = String(err?.message).includes('rate_limited') ? 'That’s a lot of waves for one hour. Try again later.' : 'That wave didn’t get through. Try again in a moment.';
+      }
+    });
+    actions.append(btn);
+  }
   card.append(
     h('p', { class: 'eyebrow' }, 'An echo'),
     h('h2', {}, e.place),
     h('p', { class: 'sub' }, `Someone was here ${relativeTime(e.last_seen)}.`),
-    h('p', { class: 'note' }, 'They have gone, so you can’t wave. Their light lingers for two days — a lantern you release now may be here when they come back.'),
+    facts([['their time', (() => { const pl = PLACES.find((x) => x.city === e.place); return pl ? localTimeString(pl.tz) : '—'; })()], ['from you', formatKm(greatCircleKm(me.lat, me.lon, e.lat, e.lon))]]),
+    actions,
+    note,
   );
 }
 
@@ -361,15 +423,18 @@ function renderLanternCard(id: string) {
   const actions = h('div', { class: 'actions' }, warmBtn);
   const translated = h('p', { class: 'translated', hidden: true });
   if ('Translator' in self && 'LanguageDetector' in self) {
-    const tb = h('button', { class: 'btn ghost small' }, 'Translate');
-    tb.addEventListener('click', async () => {
-      tb.setAttribute('disabled', ''); tb.textContent = 'Translating…';
-      const out = await translate(l.body);
-      translated.hidden = false;
-      translated.textContent = out ?? 'Already in your language, or no translation is available on this device.';
-      tb.remove();
+    void lanternLanguage(l.body).then((src) => {
+      if (!src || !actions.isConnected) return;
+      const tb = h('button', { class: 'btn ghost small' }, 'Translate');
+      tb.addEventListener('click', async () => {
+        tb.setAttribute('disabled', ''); tb.textContent = 'Translating…';
+        const out = await translate(l.body, src);
+        translated.hidden = false;
+        translated.textContent = out ?? 'No translation is available on this device.';
+        tb.remove();
+      });
+      actions.append(tb);
     });
-    actions.append(tb);
   }
   const tiny = h('div', { class: 'tiny' }, h('span', {}, l.seeded ? 'A welcome note from the makers' : `Released ${relativeTime(l.created_at)}`));
   if (!l.seeded && !mine) {
@@ -381,7 +446,7 @@ function renderLanternCard(id: string) {
     tiny.append(rb);
   }
   card.append(
-    h('p', { class: 'eyebrow' }, mine ? 'Your lantern' : l.seeded ? 'A lantern from One Sky' : 'A lantern'),
+    h('p', { class: 'eyebrow' }, (mine ? 'Your lantern' : l.seeded ? 'A lantern from One Sky' : 'A lantern') + (drift ? ` · ${((drift.i - 1) % drift.order.length) + 1} / ${drift.order.length}` : '')),
     h('p', { class: 'sub' }, `over ${l.place} · ${localTimeString(l.tz)} there now`),
     ...(q ? [h('p', { class: 'q', style: 'margin-top:14px' }, q.text)] : []),
     body, translated, actions, tiny,
@@ -389,15 +454,20 @@ function renderLanternCard(id: string) {
   audio.lanternOpen();
 }
 
-async function translate(text: string): Promise<string | null> {
+const myLang = (navigator.language || 'en').split('-')[0];
+/** The lantern's language, if it is confidently not the reader's own. */
+async function lanternLanguage(text: string): Promise<string | null> {
   try {
-    const T = (self as any).Translator, D = (self as any).LanguageDetector;
-    const det = await D.create();
-    const res = await det.detect(text);
-    const src = res?.[0]?.detectedLanguage;
-    const tgt = (navigator.language || 'en').split('-')[0];
-    if (!src || src === 'und' || src === tgt) return null;
-    const tr = await T.create({ sourceLanguage: src, targetLanguage: tgt });
+    const det = await (self as any).LanguageDetector.create();
+    const top = (await det.detect(text))?.[0];
+    const src = top?.detectedLanguage;
+    if (!src || src === 'und' || src === myLang || (top.confidence ?? 0) < 0.6) return null;
+    return src;
+  } catch { return null; }
+}
+async function translate(text: string, src: string): Promise<string | null> {
+  try {
+    const tr = await (self as any).Translator.create({ sourceLanguage: src, targetLanguage: myLang });
     return await tr.translate(text);
   } catch { return null; }
 }
@@ -434,7 +504,7 @@ function addThread(t: Thread, animate: boolean, opts: { mine?: boolean; other?: 
   stats.threads_total += 1; stats.km_total += t.km; renderStats();
   if (opts.mine) {
     audio.thread(t.km);
-    toast(rich([{ b: `You and someone in ${opts.other} are threaded.` }, { small: `${formatKm(t.km)} of light between you. It stays on the Earth for everyone to see.` }]), { ms: 9000 });
+    toast(rich([{ b: `A thread now joins you and someone in ${opts.other}.` }, { small: `${formatKm(t.km)} of light between you. It stays on the Earth for everyone to see.` }]), { ms: 9000 });
   } else if (entered) {
     feed(rich([{ b: t.a_place }, ' and ', { b: t.b_place }, ` are threaded · ${formatKm(t.km)}`]));
   }
@@ -457,6 +527,12 @@ function doRipple() {
   setTimeout(() => btn.removeAttribute('disabled'), 4000);
   const n = others().length;
   feed(rich([n > 0 ? `Your ripple is crossing the Earth — ${n} ${n === 1 ? 'person' : 'people'} can see it` : 'Your ripple is crossing the Earth']));
+  // five seconds later the ring closes on the exact opposite side of the planet
+  const anti = { lat: -me.lat, lon: me.lon > 0 ? me.lon - 180 : me.lon + 180 };
+  let near: Place | null = null, bd = 1e9;
+  for (const p of PLACES) { const d = greatCircleKm(anti.lat, anti.lon, p.lat, p.lon); if (d < bd) { bd = d; near = p; } }
+  const closing = near;
+  setTimeout(() => { if (closing) feed(rich(['Your ripple met itself on the far side of the Earth, ', { b: bd < 600 ? `near ${closing.city}` : `${formatKm(bd)} from ${closing.city}` }]), true); }, 5200);
 }
 
 // ───────────────────────── drift (a slow tour of the lanterns) ─────────────────────────
@@ -497,6 +573,35 @@ function startDrift() {
   step();
 }
 
+// ───────────────────────── watch a day pass ─────────────────────────
+
+let dayRun = 0;
+function watchDay() {
+  if (!entered) return;
+  const btn = $('btn-day'), label = $('daypass');
+  if (dayRun) { cancelAnimationFrame(dayRun); dayRun = 0; globe.sunOffset = 0; globe.setSun(new Date()); label.hidden = true; btn.setAttribute('aria-pressed', 'false'); return; }
+  stopDrift();
+  btn.setAttribute('aria-pressed', 'true');
+  label.hidden = false;
+  const t0 = performance.now(), ms = reducedMotion ? 4000 : 11000, DAY = 86400000;
+  const tick = (now: number) => {
+    const k = Math.min(1, (now - t0) / ms);
+    const e = k < 0.5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2;
+    globe.sunOffset = e * DAY || 1;
+    const when = new Date(Date.now() + e * DAY);
+    const hours = Math.round(e * 24);
+    label.replaceChildren(
+      `${localTimeString(me.tz, when)} in ${me.city}`,
+      h('small', {}, hours >= 24 ? 'and back to now' : hours === 0 ? 'now' : `${hours} ${hours === 1 ? 'hour' : 'hours'} from now`),
+    );
+    if (k < 1) { dayRun = requestAnimationFrame(tick); return; }
+    dayRun = 0; globe.sunOffset = 0; globe.setSun(new Date());
+    btn.setAttribute('aria-pressed', 'false');
+    setTimeout(() => { if (!dayRun) label.hidden = true; }, 1400);
+  };
+  dayRun = requestAnimationFrame(tick);
+}
+
 // ───────────────────────── the sun, as news ─────────────────────────
 
 const sunTold = new Map<string, number>();
@@ -529,12 +634,12 @@ function openComposer() {
   if (!entered) return;
   modal((close) => {
     const ta = h('textarea', { rows: 3, maxlength: MAX_LANTERN_LENGTH, placeholder: 'One or two sentences…', 'aria-label': 'Your answer', 'data-autofocus': true });
-    const count = h('span', { class: 'count' }, String(MAX_LANTERN_LENGTH));
+    const count = h('span', { class: 'count' }, `${MAX_LANTERN_LENGTH} left`);
     const err = h('p', { class: 'err', role: 'alert' });
     const send = h('button', { class: 'btn primary', disabled: true }, 'Release');
     const sync = () => {
       const left = MAX_LANTERN_LENGTH - [...ta.value].length;
-      count.textContent = String(left);
+      count.textContent = `${left} left`;
       count.classList.toggle('warn', left <= 20);
       if (ta.value.trim()) send.removeAttribute('disabled'); else send.setAttribute('disabled', '');
       err.textContent = '';
@@ -565,7 +670,7 @@ function openComposer() {
       h('p', { class: 'eyebrow' }, 'Today’s question'),
       h('h2', {}, question.text),
       ta, err,
-      h('div', { class: 'row' }, h('span', { class: 'fine' }, `Rises over ${me.city} · stays 48 hours · `, count), send),
+      h('div', { class: 'row' }, h('span', { class: 'fine' }, `Rises over ${me.city} · stays 48 hours`), h('span', { style: 'display:flex;align-items:center;gap:14px' }, count, send)),
     );
   }, { label: 'Release a lantern' });
 }
@@ -580,6 +685,7 @@ function openMove() {
     const choose = (p: Place) => {
       store.set('onesky.tz', p.tz);
       me = buildMe(p);
+      sunCache = null;
       renderYou(); refreshLights(); renderRing(false);
       void sky.move(me);
       void globe.flyTo(me.lat, me.lon, undefined, 1600);
@@ -588,7 +694,9 @@ function openMove() {
     };
     const paint = () => {
       const q = input.value.trim();
-      const res = q ? searchPlaces(q, 8) : [placeForTimeZone(browserTz), ...['Asia/Tokyo', 'Africa/Nairobi', 'America/Sao_Paulo', 'Europe/Paris', 'Australia/Sydney'].map((t) => placeForTimeZone(t))];
+      const home = placeForTimeZone(browserTz);
+      const res = q ? searchPlaces(q, 8) : [home, ...['Asia/Tokyo', 'Africa/Nairobi', 'America/Sao_Paulo', 'Europe/Paris', 'Australia/Sydney', 'America/Chicago'].map((t) => placeForTimeZone(t)).filter((x) => x.tz !== home.tz).slice(0, 5)];
+      list.classList.toggle('has-query', !!q);
       list.replaceChildren(...res.map((p, i) => {
         const b = h('button', { role: 'option' }, h('span', {}, p.city), h('small', {}, !q && i === 0 ? 'where your clock says you are' : p.country));
         b.addEventListener('click', () => choose(p));
@@ -621,10 +729,10 @@ function openAbout() {
       h('div', {}, h('i', { class: 'd' }), h('p', {}, h('strong', {}, 'A thread'), ' appears when two people wave at each other. It stays for everyone to see.')),
       h('div', {}, h('i', { class: 'c' }), h('p', {}, h('strong', {}, 'A lantern'), ' is one answer to today’s question. It floats over where it was written for 48 hours. Warm the ones you like.')),
       h('div', {}, h('i', { class: 'e' }), h('p', {}, h('strong', {}, 'The ring'), ' has 24 parts, one per time zone. Each lights when someone from there arrives. It resets at midnight UTC.')),
-      h('div', {}, h('i', { class: 'b' }), h('p', {}, h('strong', {}, 'An echo'), ' is someone who was here in the last two days and has gone.')),
+      h('div', {}, h('i', { class: 'b' }), h('p', {}, h('strong', {}, 'An echo'), ' is someone who was here in the last two days and has gone. Leave them a wave; they get it when they come back. ', h('strong', {}, 'A soft ring'), ' on the ground is where someone else is looking right now.')),
     ),
     h('p', {}, h('strong', {}, 'Privacy.'), ' No account, no name, no tracking. Your light sits near the main city of your time zone — taken from your device’s clock, not your location — and you can move it. Lanterns are public and anonymous.'),
-    h('p', { class: 'fine' }, 'Nobody on this globe is simulated. Earth imagery: NASA Blue Marble and Black Marble. Drag to turn, scroll or pinch to zoom. Keyboard: arrows turn, + and − zoom, [ and ] step through lights and lanterns, Enter acts, R sends a ripple.'),
+    h('p', { class: 'fine' }, 'Nobody on this globe is simulated. Earth imagery: NASA Blue Marble and Black Marble. Drag to turn, scroll or pinch to zoom. Keyboard: arrows turn, + and − zoom, [ and ] step through lights and lanterns, Enter acts, R sends a ripple, D watches a day pass.'),
   ), { label: 'About One Sky' });
 }
 
@@ -674,7 +782,9 @@ function wireSky() {
         globe.dropGaze(p.id);
         if (i < 4) feed(rich(['The light in ', { b: p.city }, ' went out']), true);
         // they become an echo straight away
-        echoes.unshift({ lat: p.lat, lon: p.lon, place: p.city, last_seen: new Date().toISOString() });
+        const known = echoes.find((x) => Math.abs(x.lat - p.lat) < 0.002 && Math.abs(x.lon - p.lon) < 0.002);
+        if (known) known.last_seen = new Date().toISOString();
+        else echoes.unshift({ lat: p.lat, lon: p.lon, place: p.city, last_seen: new Date().toISOString() });
       });
       if (echoes.length > 400) echoes.length = 400;
       if (left.length) refreshLights();
@@ -815,6 +925,22 @@ function rollDay(force?: string) {
   if (entered) { void sky.checkIn(); feed(rich(['A new day began in UTC. The ring starts again.']), true); }
 }
 
+/** On arrival: play back the waves people left for my echo while I was away. */
+async function receiveEchoWaves() {
+  const waves = await sky.collectEchoWaves().catch(() => []);
+  if (!waves.length) return;
+  waves.slice(0, 6).forEach((w, i) => setTimeout(() => {
+    const { landed } = globe.wave({ lat: w.lat, lon: w.lon }, me);
+    void landed.then(() => audio.waveIn(w.lon));
+  }, i * 700));
+  const first = waves[0];
+  const others2 = waves.length - 1;
+  toast(rich([
+    { b: waves.length === 1 ? `While you were away, someone in ${first.place} waved at you.` : `While you were away, ${waves.length} people waved at you.` },
+    { small: waves.length === 1 ? `${relativeTime(first.created_at)} · they left it with your echo` : `${first.place}${others2 === 1 ? ' and one other place' : ` and ${others2} other places`} · left with your echo` },
+  ]), { ms: 14000 });
+}
+
 /** On return: has anyone warmed my lanterns since I last looked? */
 function tellWarmthSinceLastVisit() {
   let total = 0, n = 0, where = '';
@@ -837,9 +963,12 @@ function updateArrivalCount() {
   const n = others().length;
   el.replaceChildren();
   if (!sky.uid) { el.textContent = 'Looking for the others…'; return; }
-  if (n > 0) el.append(h('b', {}, `${n} ${n === 1 ? 'person is' : 'people are'}`), ' here right now');
-  else if (stats.lights_48h > 1) el.append(h('b', {}, `${stats.lights_48h.toLocaleString('en-US')} people have`), ' been here in the last two days');
-  else el.textContent = 'The sky is quiet. Be its first light.';
+  if (n > 0) { el.append(h('b', {}, `${n} ${n === 1 ? 'person is' : 'people are'}`), ' here right now'); return; }
+  if (stats.lights_48h >= 25) { el.append(h('b', {}, `${stats.lights_48h.toLocaleString('en-US')} people`), ' have been here in the last two days'); return; }
+  // a quiet sky: say something true about the planet instead of a small number
+  const hz = horizonPlace();
+  el.append(`It is ${localTimeString(me.tz)} in ${me.city}`);
+  if (hz) el.append(' · ', h('b', {}, hz.rising ? `the sun is rising over ${hz.place.city}` : `night is falling in ${hz.place.city}`));
 }
 
 function interlude(node: Node) {
@@ -856,7 +985,7 @@ async function enter() {
   $('btn-sound').setAttribute('aria-pressed', String(!audio.muted));
   $('arrival').classList.add('is-gone');
   globe.revealAll();
-  const flight = globe.flyTo(me.lat, me.lon, globe.homeDist(), reducedMotion ? 300 : 5600);
+  const flight = globe.flyTo(Math.max(-70, Math.min(70, me.lat + (me.lat >= 0 ? 9 : -9))), me.lon, globe.homeDist(), reducedMotion ? 300 : 5600);
 
   const settled = Promise.race([(window as any).__onesky.firstContact as Promise<void>, new Promise((r) => setTimeout(r, 2500))]);
   setTimeout(() => void settled.then(() => {
@@ -864,7 +993,7 @@ async function enter() {
     const before = stats.lights_48h;
     if (n > 1) interlude(rich(['You are one of ', { em: `${n} lights` }, ' under one sky.']));
     else if (!sky.uid) interlude(rich(['The Earth, ', { em: 'as it is right now.' }]));
-    else if (before > 1) interlude(rich(['Right now, yours is ', { em: 'the only light.' }, ` ${before.toLocaleString('en-US')} have passed through in two days.`]));
+    else if (before >= 25) interlude(rich(['Right now, yours is ', { em: 'the only light.' }, ` ${before.toLocaleString('en-US')} have passed through in two days.`]));
     else interlude(rich(['Right now, yours is ', { em: 'the only light' }, ' under this sky.']));
   }), reducedMotion ? 0 : 900);
 
@@ -880,11 +1009,15 @@ async function enter() {
   $('app').classList.remove('is-hidden');
   globe.canvas.focus({ preventScroll: true });
   setTimeout(tellWarmthSinceLastVisit, 4200);
+  setTimeout(() => void receiveEchoWaves(), 2200);
   if (!store.get('onesky.seen')) {
     store.set('onesky.seen', '1');
     setTimeout(() => {
       const n = others().length;
-      toast(rich([n > 0 ? 'Tap a light to see who is awake — and wave.' : 'Tap a lantern to read it. Release your own below.', { small: 'Drag to turn the Earth. Scroll or pinch to come closer.' }]), { plain: true, ms: 9000 });
+      toast(
+        rich([n > 0 ? 'Tap a light to see who is awake — and wave.' : echoes.length ? 'The blue lights are echoes of earlier visitors. Tap one to leave a wave.' : 'Tap anywhere on Earth for its time and sky.', { small: 'Drag to turn. Scroll or pinch to come closer.' }]),
+        { plain: true, ms: 12000, action: lanterns.size ? { label: 'Drift through the lanterns', run: startDrift } : undefined },
+      );
     }, 1600);
   }
 }
@@ -901,10 +1034,10 @@ function boot() {
     $('arrival').remove();
     return;
   }
-  (window as any).__onesky = { globe, sky, get me() { return me; }, get entered() { return entered; }, lanterns, threads, select };
+  (window as any).__onesky = { globe, sky, get me() { return me; }, get entered() { return entered; }, get echoes() { return echoes; }, echoKey, lanterns, threads, select };
   canvas.tabIndex = 0;
   globe.prepareIntro(me.lat, me.lon);
-  const fitMobile = () => globe.setYShift(Math.round(innerHeight * (innerWidth < 820 ? 0.075 : 0.035)));
+  const fitMobile = () => globe.setYShift(Math.round(innerHeight * (innerWidth <= 1000 ? 0.075 : 0.035)));
   fitMobile(); addEventListener('resize', fitMobile);
 
   $('arrival-place').textContent = me.city;
@@ -928,7 +1061,7 @@ function boot() {
     tip.replaceChildren();
     if (pick.type === 'lantern') {
       const l = lanterns.get(pick.id); if (!l) { tip.hidden = true; return; }
-      tip.append(l.body.length > 64 ? `“${l.body.slice(0, 62)}…”` : `“${l.body}”`, h('small', {}, `a lantern over ${l.place}`));
+      tip.append(`“${l.body}”`, h('small', {}, `a lantern over ${l.place}`));
     } else if (pick.id.startsWith('echo:')) {
       const e = echoById(pick.id); if (!e) { tip.hidden = true; return; }
       tip.append(e.place, h('small', {}, `an echo · here ${relativeTime(e.last_seen)}`));
@@ -946,6 +1079,7 @@ function boot() {
     else if (k === 'ArrowUp') globe.nudge(0, 5); else if (k === 'ArrowDown') globe.nudge(0, -5);
     else if (k === '+' || k === '=') globe.zoom(0.88); else if (k === '-' || k === '_') globe.zoom(1.14);
     else if (k === 'r' || k === 'R') doRipple();
+    else if (k === 'd' || k === 'D') watchDay();
     else if (k === ']' || k === '[') {
       if (!entered) return;
       const stops: Pick[] = [
@@ -967,6 +1101,7 @@ function boot() {
   $('btn-enter').addEventListener('click', () => void enter());
   $('btn-lantern').addEventListener('click', () => { stopDrift(); openComposer(); });
   $('btn-ripple').addEventListener('click', doRipple);
+  $('btn-day').addEventListener('click', watchDay);
   $('btn-drift').addEventListener('click', () => { if (drift) { stopDrift(); closeCard(); } else startDrift(); });
   canvas.addEventListener('pointerdown', stopDrift);
   canvas.addEventListener('wheel', stopDrift, { passive: true });

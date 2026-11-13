@@ -50,7 +50,7 @@ await a.bringToFront(); await wait(900); await a.screenshot({ path: `${out}/07-w
 await b.bringToFront(); await b.locator('.toast button').waitFor({ timeout: 180000 });
 await b.bringToFront(); await wait(900); await b.screenshot({ path: `${out}/08-wave-received.png` });
 await b.locator('.toast button').click({ timeout: 60000 });
-await a.bringToFront(); await a.locator('.toast', { hasText: 'threaded' }).waitFor({ timeout: 180000 });
+await a.bringToFront(); await a.locator('.toast', { hasText: 'thread now joins' }).waitFor({ timeout: 180000 });
 await a.bringToFront(); await wait(900); await a.screenshot({ path: `${out}/09-threaded.png` });
 await a.evaluate(() => { window.__onesky.select(null); window.__onesky.globe.flyTo(30, -30, 3.6, 800); });
 await wait(2500);

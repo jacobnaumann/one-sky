@@ -49,8 +49,8 @@ test('two visitors see each other, wave, wave back, and a third sees their threa
   await incoming.getByRole('button', { name: 'Wave back' }).click();
 
   // both are threaded
-  await expect(b.locator('.toast', { hasText: 'are threaded' })).toBeVisible();
-  await expect(a.locator('.toast', { hasText: 'are threaded' })).toBeVisible();
+  await expect(b.locator('.toast', { hasText: 'thread now joins' })).toBeVisible();
+  await expect(a.locator('.toast', { hasText: 'thread now joins' })).toBeVisible();
   await expect(a.locator('#st-threads')).not.toHaveText('0');
   const threadsA = await a.evaluate(() => [...(window as any).__onesky.threads.keys()] as string[]);
   expect(threadsA.length).toBeGreaterThan(0);
@@ -121,4 +121,38 @@ test('the page works with keyboard and shows the daily question', async ({ brows
   await a.locator('#btn-drift').click();
   await expect(a.locator('#card')).toBeHidden();
   await a.context().close();
+});
+
+test('a wave left for an echo is delivered when that person comes back', async ({ browser }) => {
+  // A visits from Tokyo and leaves; the browser profile (and so the anonymous identity) is kept
+  const ctxA = await browser.newContext({ timezoneId: 'Asia/Tokyo', reducedMotion: 'reduce' });
+  const enter = async (page: Page) => {
+    await page.goto('./?low');
+    await expect(page.locator('#btn-enter')).toBeEnabled();
+    await expect.poll(() => page.evaluate(() => (window as any).__onesky.sky.online), { timeout: 30_000 }).toBe(true);
+    await page.locator('#btn-enter').click();
+    await expect.poll(() => page.evaluate(() => (window as any).__onesky.entered)).toBe(true);
+  };
+  const a1 = await ctxA.newPage();
+  await enter(a1);
+  await a1.waitForTimeout(2500); // let the check-in land
+  await a1.close();
+
+  // B arrives later, finds A's echo, and leaves a wave
+  const b = await visitor(browser, 'Europe/Lisbon');
+  const key = await expect.poll(() => b.evaluate(() => {
+    const o = (window as any).__onesky;
+    const e = o.echoes.find((x: any) => x.place === 'Tokyo' && x.eid);
+    return e ? o.echoKey(e) : null;
+  }), { timeout: 30_000 }).not.toBeNull().then(() => b.evaluate(() => { const o = (window as any).__onesky; return o.echoKey(o.echoes.find((x: any) => x.place === 'Tokyo' && x.eid)); }));
+  await b.evaluate((id) => (window as any).__onesky.select({ type: 'light', id }), key);
+  await expect(b.locator('#card h2')).toHaveText('Tokyo');
+  await b.locator('#card button.btn.primary').click();
+  await expect(b.locator('#card .note')).toContainText('waiting for them');
+
+  // A comes back and is told
+  const a2 = await ctxA.newPage();
+  await enter(a2);
+  await expect(a2.locator('.toast', { hasText: 'While you were away, someone in Lisbon waved at you' })).toBeVisible();
+  await ctxA.close(); await b.context().close();
 });

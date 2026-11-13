@@ -45,10 +45,10 @@ void main() {
 
   // Sun glint on water.
   vec3 H = normalize(uSun + V);
-  float spec = pow(max(dot(N, H), 0.0), 90.0) * water;
-  lit += vec3(1.0, 0.86, 0.66) * spec * 0.30 * dayAmt;
+  float spec = pow(max(dot(N, H), 0.0), 700.0) * water;
+  lit += vec3(1.0, 0.86, 0.66) * spec * 0.26 * dayAmt;
   float sheen = pow(max(dot(N, H), 0.0), 9.0) * water;
-  lit += vec3(0.30, 0.42, 0.60) * sheen * 0.045 * dayAmt;
+  lit += vec3(0.30, 0.42, 0.60) * sheen * 0.02 * dayAmt;
 
   // Clouds drift slowly eastward; a second offset sample fakes their shadow.
   vec2 cuv = vec2(vUv.x + uTime * 0.0009, vUv.y);
@@ -194,7 +194,7 @@ void main() {
   vFacing = smoothstep(-0.05, 0.22, dot(normalize(wp.xyz), toCam));
   vec4 mv = viewMatrix * wp;
   gl_Position = projectionMatrix * mv;
-  gl_PointSize = aSize * pulse * uPx * (uDist / max(-mv.z, 0.1));
+  gl_PointSize = min(aSize * pulse * uPx * (uDist / max(-mv.z, 0.1)), 132.0 * uPx);
 }`;
 
 export const dotFrag = /* glsl */ `
@@ -227,8 +227,9 @@ void main() {
     col = vec3(1.0, 0.96, 0.86) * core * 3.6 + vec3(1.0, 0.70, 0.34) * (halo + ring);
   } else if (vKind < 2.5) {
     // An echo: someone who was here recently. Cool and quiet.
-    float core = exp(-d * d * 26.0);
-    col = vec3(0.50, 0.66, 1.0) * core * (0.32 + 0.5 * vGlow);
+    float core = exp(-d * d * 30.0);
+    float ring = exp(-pow((d - 0.52) / 0.07, 2.0)) * 0.22;
+    col = vec3(0.50, 0.66, 1.0) * (core * (0.85 + 0.8 * vGlow) + ring * (0.5 + 0.5 * vGlow));
   } else if (vKind < 3.5) {
     // Where someone else is looking.
     float disc = smoothstep(1.0, 0.0, d);
@@ -257,7 +258,7 @@ void main() {
     col = vec3(1.0, 0.95, 0.85) * core * 4.0 + vec3(1.0, 0.72, 0.40) * halo;
   }
 
-  col *= vFacing * uReveal;
+  col *= smoothstep(1.0, 0.70, d) * vFacing * uReveal;
   gl_FragColor = vec4(col, 1.0);
   #include <tonemapping_fragment>
   #include <colorspace_fragment>
@@ -306,7 +307,7 @@ varying vec2 vUv;
 varying float vFacing;
 void main() {
   float ends = smoothstep(0.0, 0.04, vUv.x) * smoothstep(1.0, 0.96, vUv.x);
-  vec3 off = vec3(0.50, 0.62, 0.90) * 0.085;
+  vec3 off = vec3(0.50, 0.62, 0.90) * 0.17;
   vec3 on = vec3(1.0, 0.70, 0.34) * (0.80 + uFlash * 3.0);
   vec3 col = mix(off, on, uLit) * ends * (0.35 + 0.65 * vFacing) * uReveal;
   gl_FragColor = vec4(col, 1.0);
