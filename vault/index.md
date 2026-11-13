@@ -11,22 +11,21 @@ and together try to light all 24 time zones in a day.
 
 ## Current state
 
-- 2026-11-13 08:05 UTC — **Live** at https://jacobnaumann.github.io/one-sky/ (repo `jacobnaumann/one-sky`, Supabase `evktxfawnualbbmoujip`).
-- Working and tested on production: presence, gaze, waves, threads, ripples, lanterns (release/warm/report/translate), 24-zone ring, echoes, drift, postcard, move-my-light, sound engine (levels measured, never listened to).
-- Backend hardened after a security review; visitor data reset to the 6 seeded lanterns.
-- Also live: echo waves, watch-a-day-pass, drift captions. Reviews (security, bugs, design, audio levels) acted on.
+- 2026-11-13 17:15 UTC — **Live and finished for hand-off** at https://jacobnaumann.github.io/one-sky/ (repo `jacobnaumann/one-sky`, Supabase `evktxfawnualbbmoujip`).
+- Features: live Earth with real sun; presence, gaze, waves, threads, ripples; lanterns (release, warm, report, translate); 24-zone ring; echoes and echo waves; Drift; watch a day pass; postcard; move my light; generative sound.
+- Reviewed and acted on: two security reviews, two bug/regression hunts, a design critique, two first-time-visitor passes, measured audio levels.
+- Tests: unit 127; live database 192; multi-visitor browser tests 4, passing on production in Chromium, Firefox and WebKit.
+- Live database holds only the 6 welcome lanterns (test data reset).
 
 ## Open items
 
-- [x] Scaffold, globe, backend, presence/waves/threads, lanterns, ring, sound, arrival, postcard, mobile
-- [x] Deploy to GitHub Pages; multi-visitor tests on production
-- [x] Security review and fixes
-- [x] Act on the design critique
-- [x] Act on the client bug hunt
-- [x] Act on the measured-audio report
-- [ ] Final reset of test data, final deploy, hand-off summary
-- [ ] After the demo: consider lowering the anonymous sign-in limit back to 30/hour (`supabase/config.toml`)
-- [ ] Someone with speakers should listen to the sound once
+- [ ] Someone with speakers should listen to the sound once (samples: `node scripts/audio-qa.mjs --wav`)
+- [ ] Try it on a real iPhone and a real Android phone
+- [ ] After the demo: put `anonymous_users` back to 30 in `supabase/config.toml` and push; consider Turnstile captcha
+- [ ] Clean dead/overridden CSS in `src/styles.css` (list in the 17:15 log entry's regression report)
+- [ ] Larger fixes noted under Known limits in [[architecture]]: database-backed roster instead of trusting presence keys; `my_marks()` returning the other party's uid
+- [ ] `places` table must be regenerated in a migration if `scripts/gen-tz.py` regenerates `tzdata.ts`
+- [ ] The Supabase free project pauses after about a week without use
 
 ## Map
 
