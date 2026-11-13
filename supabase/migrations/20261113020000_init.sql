@@ -1,5 +1,7 @@
 -- One Sky: schema, policies, functions, realtime, housekeeping, seed.
--- Invariants: RLS on every table; no direct client writes; uids never readable by clients.
+-- Invariants: RLS on every table; no direct client writes; uid columns are never readable by clients.
+-- (Uids themselves are not secret: the realtime presence key on channel `sky` is the auth uid and
+-- every connected client can see it. Nothing may rely on a uid being unguessable.)
 
 -- ───────────────────────────── tables ─────────────────────────────
 

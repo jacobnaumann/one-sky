@@ -33,6 +33,10 @@ test('two visitors see each other, wave, wave back, and a third sees their threa
   await expect.poll(async () => Number(await a.locator('#ring-count').textContent())).toBeGreaterThanOrEqual(2);
   await expect(a.locator('#ringstrip i.lit')).not.toHaveCount(0);
 
+  // a ripple sent by A reaches B
+  await a.locator('#btn-ripple').click();
+  await expect(b.locator('.feed li', { hasText: 'A ripple from Tokyo' })).toBeVisible();
+
   // A selects B and waves
   await a.evaluate((id) => (window as any).__onesky.select({ type: 'light', id }), ub);
   await expect(a.locator('#card h2')).toHaveText('Lisbon');
@@ -108,5 +112,13 @@ test('the page works with keyboard and shows the daily question', async ({ brows
   await expect(a.locator('#you-place')).toContainText('Reykjav');
   await a.locator('#btn-postcard').click();
   await expect(a.locator('.postcard-img')).toBeVisible();
+  await a.keyboard.press('Escape');
+
+  // drift opens lanterns one after another and stops when asked
+  await a.locator('#btn-drift').click();
+  await expect(a.locator('#card blockquote')).toBeVisible();
+  await expect(a.locator('#btn-drift')).toHaveAttribute('aria-pressed', 'true');
+  await a.locator('#btn-drift').click();
+  await expect(a.locator('#card')).toBeHidden();
   await a.context().close();
 });

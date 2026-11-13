@@ -2,6 +2,10 @@
 // gaze + waves (broadcast), and lanterns / threads / ring (database).
 import { createClient, type RealtimeChannel, type SupabaseClient } from '@supabase/supabase-js';
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from './config';
+import { placeByTz, JITTER_DEGREES } from '../lib/tz';
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const lonGap = (a: number, b: number) => { const d = Math.abs(a - b) % 360; return d > 180 ? 360 - d : d; };
 
 export interface Me { lat: number; lon: number; city: string; country: string; tz: string; zone: number }
 export interface Person { id: string; lat: number; lon: number; city: string; country: string; tz: string; since: number }
@@ -19,15 +23,15 @@ export interface Stats {
   threads_total: number; km_total: number; lanterns_48h: number; lights_today: number; lights_48h: number;
   zones_today: number[]; day: string;
 }
-export interface WaveMsg { from: string; to: string; lat: number; lon: number; city: string; country: string; tz: string; tlat: number; tlon: number }
-export interface ThreadMsg extends Thread { a: string; b: string }
+export interface WaveMsg { from: Person; to: string; target: { lat: number; lon: number } | null }
 export interface Marks { lanterns: string[]; warmed: string[]; threads: string[] }
 
 type Events = {
   people: (people: Map<string, Person>, joined: Person[], left: Person[]) => void;
   gaze: (g: { id: string; lat: number; lon: number }) => void;
   wave: (w: WaveMsg) => void;
-  thread: (t: Thread, msg: ThreadMsg | null) => void;
+  thread: (t: Thread) => void;
+  ripple: (from: Person) => void;
   lantern: (l: Lantern, fresh: boolean) => void;
   zone: (z: ZoneDay) => void;
   lanternHidden: (id: string) => void;
@@ -48,6 +52,11 @@ export class Sky {
   private me: Me | null = null;
   private tracking = false;
   private handlers: { [K in keyof Events]?: Events[K][] } = {};
+  private lastWaveFrom = new Map<string, number>();
+  private lastRippleFrom = new Map<string, number>();
+  private hiddenChecked = new Map<string, number>();
+  /** ids the UI currently shows; hidden-lantern hints for anything else are ignored */
+  knownLantern: (id: string) => boolean = () => false;
 
   constructor() {
     this.db = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
@@ -79,21 +88,37 @@ export class Sky {
     this.ch = ch;
     ch.on('presence', { event: 'sync' }, () => this.syncPeople());
     ch.on('broadcast', { event: 'gaze' }, ({ payload }) => {
-      if (!payload || typeof payload.id !== 'string') return;
-      this.emit('gaze', { id: payload.id, lat: num(payload.lat), lon: num(payload.lon) });
+      if (!payload || typeof payload.id !== 'string' || !this.people.has(payload.id)) return;
+      const lat = num(payload.lat, 999), lon = num(payload.lon, 999);
+      if (Math.abs(lat) > 90 || Math.abs(lon) > 180) return;
+      this.emit('gaze', { id: payload.id, lat, lon });
     });
     ch.on('broadcast', { event: 'wave' }, ({ payload }) => {
-      const w = this.cleanWave(payload);
-      if (w) this.emit('wave', w);
+      // A broadcast can be sent by anyone, so only the two ids are read from it; who and where
+      // they are comes from presence. One wave per sender every 3 seconds.
+      if (!payload || typeof payload.from !== 'string' || typeof payload.to !== 'string') return;
+      const from = this.people.get(payload.from);
+      if (!from || payload.from === this.uid) return;
+      const now = Date.now();
+      if (now - (this.lastWaveFrom.get(from.id) ?? 0) < 3000) return;
+      this.lastWaveFrom.set(from.id, now);
+      const to = payload.to === this.uid ? null : this.people.get(payload.to);
+      if (payload.to !== this.uid && !to) return;
+      this.emit('wave', { from, to: payload.to, target: to ? { lat: to.lat, lon: to.lon } : null });
     });
-    ch.on('broadcast', { event: 'thread' }, ({ payload }) => {
-      const t = this.cleanThread(payload);
-      if (t && typeof payload.a === 'string' && typeof payload.b === 'string') this.emit('thread', t, { ...t, a: payload.a, b: payload.b });
+    ch.on('broadcast', { event: 'ripple' }, ({ payload }) => {
+      // only the sender's id is trusted; one ripple per sender every 4 seconds
+      const from = payload && typeof payload.from === 'string' ? this.people.get(payload.from) : undefined;
+      if (!from || from.id === this.uid) return;
+      const now = Date.now();
+      if (now - (this.lastRippleFrom.get(from.id) ?? 0) < 4000) return;
+      this.lastRippleFrom.set(from.id, now);
+      this.emit('ripple', from);
     });
-    ch.on('broadcast', { event: 'lantern_hidden' }, ({ payload }) => { if (payload && typeof payload.id === 'string') void this.confirmHidden(payload.id); });
+    ch.on('broadcast', { event: 'lantern_hidden' }, ({ payload }) => { if (payload && typeof payload.id === 'string' && UUID.test(payload.id)) void this.confirmHidden(payload.id); });
     ch.on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'lanterns' }, (p) => { const l = this.cleanLantern(p.new); if (l) this.emit('lantern', l, true); });
     ch.on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'lanterns' }, (p) => { const l = this.cleanLantern(p.new); if (l) this.emit('lantern', l, false); });
-    ch.on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'threads' }, (p) => { const t = this.cleanThread(p.new); if (t) this.emit('thread', t, null); });
+    ch.on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'threads' }, (p) => { const t = this.cleanThread(p.new); if (t) this.emit('thread', t); });
     ch.on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'zone_days' }, (p) => {
       const z = p.new as any;
       if (z && typeof z.zone === 'number') this.emit('zone', { day: str(z.day, 10), zone: z.zone, place: str(z.place, 60), lit_at: str(z.lit_at, 40) });
@@ -115,14 +140,20 @@ export class Sky {
     const state = this.ch.presenceState() as Record<string, any[]>;
     const next = new Map<string, Person>();
     for (const [id, metas] of Object.entries(state)) {
-      const m = metas[metas.length - 1];
+      // Presence is client-supplied. Accept only a uuid key, a known time zone, and a position
+      // inside that zone's jitter box; the names shown come from our own table, never the payload.
+      if (!UUID.test(id) || next.size >= 2000) continue;
+      const m = metas[0];
       if (!m || typeof m.lat !== 'number' || typeof m.lon !== 'number') continue;
-      if (Math.abs(m.lat) > 90 || Math.abs(m.lon) > 180) continue;
-      next.set(id, { id, lat: m.lat, lon: m.lon, city: str(m.city, 40) || 'Somewhere', country: str(m.country, 50), tz: str(m.tz, 64), since: num(m.since, Date.now()) });
+      const place = placeByTz(m.tz);
+      if (!place) continue;
+      if (Math.abs(m.lat - place.lat) > JITTER_DEGREES + 0.01 || lonGap(m.lon, place.lon) > JITTER_DEGREES + 0.01) continue;
+      const since = num(m.since, Date.now());
+      next.set(id, { id, lat: m.lat, lon: m.lon, city: place.city, country: place.country, tz: place.tz, since: Math.min(since, Date.now()) });
     }
     const joined: Person[] = [], left: Person[] = [];
     for (const [id, p] of next) if (!this.people.has(id)) joined.push(p);
-    for (const [id, p] of this.people) if (!next.has(id)) left.push(p);
+    for (const [id, p] of this.people) if (!next.has(id)) { left.push(p); this.lastWaveFrom.delete(id); this.lastRippleFrom.delete(id); }
     this.people = next;
     this.emit('people', next, joined, left);
   }
@@ -146,15 +177,19 @@ export class Sky {
     void this.ch.send({ type: 'broadcast', event: 'gaze', payload: { id: this.uid, lat: +lat.toFixed(2), lon: +lon.toFixed(2) } });
   }
 
+  sendRipple() {
+    if (!this.ch || !this.online || !this.uid || !this.tracking) return;
+    void this.ch.send({ type: 'broadcast', event: 'ripple', payload: { from: this.uid } });
+  }
+
   /** Wave at someone. Returns a thread if this completed a mutual wave. */
   async wave(to: Person): Promise<Thread | null> {
     const m = this.me;
     if (!m || !this.uid || !this.ch) return null;
-    void this.ch.send({ type: 'broadcast', event: 'wave', payload: { from: this.uid, to: to.id, lat: m.lat, lon: m.lon, city: m.city, country: m.country, tz: m.tz, tlat: to.lat, tlon: to.lon } satisfies WaveMsg });
-    const { data, error } = await this.db.rpc('send_wave', { p_to: to.id, p_lat: m.lat, p_lon: m.lon, p_place: m.city });
+    void this.ch.send({ type: 'broadcast', event: 'wave', payload: { from: this.uid, to: to.id } });
+    const { data, error } = await this.db.rpc('send_wave', { p_to: to.id, p_lat: m.lat, p_lon: m.lon, p_place: m.city, p_tz: m.tz });
     if (error) throw new Error(error.message);
     const t = this.cleanThread((data as any)?.thread);
-    if (t) void this.ch.send({ type: 'broadcast', event: 'thread', payload: { ...t, a: to.id, b: this.uid } });
     return t;
   }
 
@@ -212,6 +247,11 @@ export class Sky {
 
   /** A hidden-lantern broadcast is only a hint (anyone can send one); confirm against the database. */
   private async confirmHidden(id: string) {
+    if (!this.knownLantern(id)) return;
+    const now = Date.now();
+    if (now - (this.hiddenChecked.get(id) ?? 0) < 60000) return;
+    if (this.hiddenChecked.size > 500) this.hiddenChecked.clear();
+    this.hiddenChecked.set(id, now);
     const { data, error } = await this.db.from('lanterns').select('id').eq('id', id).limit(1);
     if (!error && data && data.length === 0) this.emit('lanternHidden', id);
   }
@@ -228,11 +268,5 @@ export class Sky {
     if (!r || typeof r.id !== 'string') return null;
     for (const k of ['a_lat', 'a_lon', 'b_lat', 'b_lon', 'km']) if (typeof r[k] !== 'number' || !isFinite(r[k])) return null;
     return { id: r.id, a_lat: r.a_lat, a_lon: r.a_lon, a_place: str(r.a_place, 60), b_lat: r.b_lat, b_lon: r.b_lon, b_place: str(r.b_place, 60), km: r.km, created_at: str(r.created_at, 40) };
-  }
-  private cleanWave(p: any): WaveMsg | null {
-    if (!p || typeof p.from !== 'string' || typeof p.to !== 'string') return null;
-    for (const k of ['lat', 'lon', 'tlat', 'tlon']) if (typeof p[k] !== 'number' || !isFinite(p[k])) return null;
-    if (Math.abs(p.lat) > 90 || Math.abs(p.tlat) > 90 || Math.abs(p.lon) > 180 || Math.abs(p.tlon) > 180) return null;
-    return { from: p.from, to: p.to, lat: p.lat, lon: p.lon, city: str(p.city, 40) || 'Somewhere', country: str(p.country, 50), tz: str(p.tz, 64), tlat: p.tlat, tlon: p.tlon };
   }
 }

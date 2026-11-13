@@ -4,12 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#000000">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' https://evktxfawnualbbmoujip.supabase.co wss://evktxfawnualbbmoujip.supabase.co; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; script-src 'self'; worker-src 'self' blob:; base-uri 'self'; form-action 'none'">
 <title>One Sky — everyone here right now is a light on the Earth</title>
 <meta name="description" content="A live Earth, lit by the real sun, where every person on the page is a light where they are. Wave across the planet. Release a lantern. Help light all 24 time zones today.">
 <meta property="og:title" content="One Sky">
 <meta property="og:description" content="Everyone here right now is a light on the Earth. Come be one.">
 <meta property="og:type" content="website">
-<meta property="og:image" content="./og.jpg">
+<meta property="og:image" content="https://jacobnaumann.github.io/one-sky/og.jpg">
 <meta name="twitter:card" content="summary_large_image">
 <link rel="icon" href="./favicon.svg" type="image/svg+xml">
 </head>
@@ -28,6 +29,10 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path class="on" d="M4 9.5v5h3.2L12 18.5v-13L7.2 9.5H4Zm11.2-1.3a5 5 0 0 1 0 7.6M17.6 5.6a8.6 8.6 0 0 1 0 12.8"/><path class="off" d="M4 9.5v5h3.2L12 18.5v-13L7.2 9.5H4Zm11.5.2 4.6 4.6m0-4.6-4.6 4.6"/></svg>
         <span class="sr">Sound</span>
       </button>
+      <button class="icon-btn" id="btn-drift" aria-pressed="false" title="Drift: let the Earth carry you from lantern to lantern">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path class="play" d="M9 6.8v10.4l8.2-5.200L9 6.800Z"/><path class="stop" d="M8 7.500h8v9H8z"/></svg>
+        <span class="sr">Drift through the lanterns</span>
+      </button>
       <button class="icon-btn" id="btn-postcard" title="Save a postcard of this view">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 8.2h3l1.4-2.2h6.2l1.4 2.2h3v10.3h-15V8.2Z"/><circle cx="12" cy="13.2" r="3.2"/></svg>
         <span class="sr">Postcard</span>
@@ -45,13 +50,17 @@
     <p class="eyebrow">Your light</p>
     <p class="you-place"><span id="you-place">—</span></p>
     <p class="you-meta"><span id="you-time">—</span></p>
+    <p class="you-meta you-threads" id="you-threads" hidden></p>
     <button class="link" id="btn-move">Move my light</button>
   </section>
 
   <section class="ask" aria-label="Today's question">
     <p class="eyebrow">Today, the whole world is asked</p>
     <p class="ask-q" id="ask-q">&nbsp;</p>
-    <button class="btn primary" id="btn-lantern"><span class="lantern-ico" aria-hidden="true"></span><span id="btn-lantern-label">Release a lantern</span></button>
+    <div class="ask-actions">
+      <button class="btn primary" id="btn-lantern"><span class="lantern-ico" aria-hidden="true"></span><span id="btn-lantern-label">Release a lantern</span></button>
+      <button class="btn ghost" id="btn-ripple" title="Send a ring of light around the whole Earth. Everyone here sees and hears it."><span class="ripple-ico" aria-hidden="true"></span>Ripple</button>
+    </div>
   </section>
 
   <section class="world" aria-label="The world today">

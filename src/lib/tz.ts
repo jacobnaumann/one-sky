@@ -77,6 +77,11 @@ export function placeForTimeZone(tz: string | undefined, date: Date = new Date()
   }
 }
 
+/** Exact lookup by canonical zone name only: no aliases, no fallback. For validating remote data. */
+export function placeByTz(tz: unknown): Place | undefined {
+  return typeof tz === 'string' ? byTz.get(tz) : undefined;
+}
+
 const offsetCache = new Map<string, Place>();
 
 /**

@@ -8,7 +8,7 @@ import { Sky, type Person, type Lantern, type Thread, type Echo, type ZoneDay, t
 import { AudioEngine } from './audio/engine';
 import { placeForTimeZone, placeForOffset, searchPlaces, jitter, PLACES, type Place } from './lib/tz';
 import { localTimeString, zoneIndex, zoneLabel, utcDay, relativeTime } from './lib/time';
-import { skyState } from './lib/sun';
+import { skyState, solarElevation } from './lib/sun';
 import { greatCircleKm, formatKm } from './lib/geo';
 import { questionForDay, QUESTIONS } from './lib/questions';
 import { cleanLantern, reasonMessage, MAX_LANTERN_LENGTH } from './lib/moderation';
@@ -87,7 +87,7 @@ function renderCensus() {
   if (!sky.uid) { el.textContent = 'Finding the others…'; return; }
   const live = n === 0 ? 'No lights awake yet' : n === 1 ? (entered ? 'You are the only light awake' : '1 light awake') : `${n} lights awake`;
   el.append(h('b', {}, live));
-  if (stats.lights_48h > 0) el.append(` · ${stats.lights_48h.toLocaleString('en-US')} in the last two days`);
+  if (stats.lights_48h > 0) el.append(h('span', { class: 'wide' }, ` · ${stats.lights_48h.toLocaleString('en-US')} in the last two days`));
 }
 
 function renderYou() {
@@ -95,7 +95,16 @@ function renderYou() {
   $('you-time').textContent = skyLine(me.lat, me.lon, me.tz);
 }
 
+function renderMine() {
+  let n = 0, km = 0;
+  for (const id of marks.threads) { const t = threads.get(id); if (t) { n++; km += t.km; } }
+  const el = $('you-threads');
+  el.hidden = n === 0;
+  if (n) el.textContent = `${n} ${n === 1 ? 'thread' : 'threads'} of yours · ${formatKm(km)}`;
+}
+
 function renderStats() {
+  renderMine();
   countTo($('st-threads'), stats.threads_total);
   countTo($('st-km'), stats.km_total);
 }
@@ -170,6 +179,24 @@ const selfLabel = h('div', { class: 'label self off' }, 'you');
 const reticle = h('div', { class: 'reticle off' });
 labelLayer.append(reticle, selfLabel);
 const liveLabels = new Map<string, HTMLElement>();
+const spotLabel = h('div', { class: 'label spot off' });
+labelLayer.append(spotLabel);
+let spot: { lat: number; lon: number; until: number } | null = null;
+
+/** Tap empty Earth: what time is it there, and what is its sky doing? */
+function showSpot(x: number, y: number) {
+  const hit = globe.hit(x, y);
+  if (!hit) { spot = null; return; }
+  let best: Place | null = null, bd = 1e9;
+  for (const p of PLACES) {
+    const d = greatCircleKm(hit.lat, hit.lon, p.lat, p.lon);
+    if (d < bd) { bd = d; best = p; }
+  }
+  if (!best || bd > 2600) { spot = null; return; }
+  spotLabel.replaceChildren(h('b', {}, best.city), ` ${localTimeString(best.tz)} · ${skyState(best.lat, best.lon, new Date())}`);
+  spot = { lat: best.lat, lon: best.lon, until: performance.now() + 5200 };
+  audio.uiTick();
+}
 
 function place(el: HTMLElement, s: { x: number; y: number; visible: boolean }, show: boolean) {
   el.classList.toggle('off', !(show && s.visible));
@@ -189,6 +216,9 @@ function updateLabels() {
     place(el, globe.project(p.lat, p.lon), show && entered);
   }
   for (const [id, el] of liveLabels) if (!seen.has(id)) { el.remove(); liveLabels.delete(id); }
+
+  if (spot && performance.now() > spot.until) spot = null;
+  if (spot) place(spotLabel, globe.project(spot.lat, spot.lon), true); else spotLabel.classList.add('off');
 
   const target = selectionPoint();
   if (target) {
@@ -211,7 +241,7 @@ function selectionPoint(): { lat: number; lon: number; r?: number } | null {
 // ───────────────────────── card ─────────────────────────
 
 const card = $('card');
-function closeCard() { selection = null; card.hidden = true; card.replaceChildren(); globe.autoRotate = true; }
+function closeCard() { if (drift) stopDrift(); selection = null; card.hidden = true; card.replaceChildren(); globe.autoRotate = true; }
 
 function select(pick: Pick | null, fly = true) {
   if (!pick) { closeCard(); return; }
@@ -381,6 +411,83 @@ function addThread(t: Thread, animate: boolean, opts: { mine?: boolean; other?: 
   }
 }
 
+// ───────────────────────── ripples ─────────────────────────
+
+let lastRipple = 0;
+function doRipple() {
+  if (!entered) return;
+  const now = Date.now();
+  if (now - lastRipple < 4000) return;
+  lastRipple = now;
+  globe.ripple(me.lat, me.lon);
+  audio.ringSegment(Math.round(((me.lon + 180) / 360) * 23));
+  sky.sendRipple();
+  const btn = $('btn-ripple');
+  btn.classList.remove('pulse'); void btn.offsetWidth; btn.classList.add('pulse');
+  btn.setAttribute('disabled', '');
+  setTimeout(() => btn.removeAttribute('disabled'), 4000);
+  const n = others().length;
+  feed(rich([n > 0 ? `Your ripple is crossing the Earth — ${n} ${n === 1 ? 'person' : 'people'} can see it` : 'Your ripple is crossing the Earth']));
+}
+
+// ───────────────────────── drift (a slow tour of the lanterns) ─────────────────────────
+
+let drift: { timer: number; order: string[]; i: number } | null = null;
+function stopDrift() {
+  if (!drift) return;
+  clearTimeout(drift.timer);
+  drift = null;
+  $('btn-drift').setAttribute('aria-pressed', 'false');
+  $('app').classList.remove('is-drifting');
+}
+function startDrift() {
+  if (!entered) return;
+  const order = [...lanterns.values()].sort((a, b) => a.lon - b.lon).map((l) => l.id);
+  if (!order.length) { toast(rich(['No lanterns are aloft yet. Release the first one.']), { plain: true }); return; }
+  // begin with the lantern nearest to where the visitor is looking
+  const here = globe.gaze();
+  let start = 0, bd = 1e9;
+  order.forEach((id, i) => { const l = lanterns.get(id)!; const d = greatCircleKm(here.lat, here.lon, l.lat, l.lon); if (d < bd) { bd = d; start = i; } });
+  drift = { timer: 0, order, i: start };
+  $('btn-drift').setAttribute('aria-pressed', 'true');
+  $('app').classList.add('is-drifting');
+  const step = () => {
+    if (!drift) return;
+    let tries = 0;
+    while (tries++ < drift.order.length && !lanterns.has(drift.order[drift.i % drift.order.length])) drift.i++;
+    const id = drift.order[drift.i % drift.order.length];
+    if (!lanterns.has(id)) { stopDrift(); return; }
+    drift.i++;
+    selection = { type: 'lantern', id };
+    globe.autoRotate = false;
+    const l = lanterns.get(id)!;
+    void globe.flyTo(l.lat - 6, l.lon, Math.min(globe.homeDist(), 2.9), 2600);
+    renderCard();
+    drift.timer = window.setTimeout(step, 8500);
+  };
+  step();
+}
+
+// ───────────────────────── the sun, as news ─────────────────────────
+
+const sunTold = new Map<string, number>();
+function sunNews() {
+  if (!entered || document.hidden || drift) return;
+  const now = new Date(), soon = new Date(now.getTime() + 6 * 60000);
+  const rising: Place[] = [], setting: Place[] = [];
+  for (const p of PLACES) {
+    const e = solarElevation(p.lat, p.lon, now);
+    if (Math.abs(e) > 0.9) continue;
+    if (Date.now() - (sunTold.get(p.tz) ?? 0) < 6 * 3600 * 1000) continue;
+    (solarElevation(p.lat, p.lon, soon) > e ? rising : setting).push(p);
+  }
+  const pool = rising.length && (Math.random() < 0.6 || !setting.length) ? rising : setting;
+  if (!pool.length) return;
+  const p = pool[Math.floor(Math.random() * pool.length)];
+  sunTold.set(p.tz, Date.now());
+  feed(rich([pool === rising ? 'The sun is rising over ' : 'Night is falling in ', { b: p.city }]), true);
+}
+
 // ───────────────────────── lanterns ─────────────────────────
 
 const LANTERN_ERRORS: Record<string, string> = {
@@ -515,25 +622,28 @@ async function openPostcard() {
 // ───────────────────────── net events ─────────────────────────
 
 function wireSky() {
+  sky.knownLantern = (id) => lanterns.has(id);
   sky.on('status', (online) => { $('offline').hidden = online || !entered; });
 
   sky.on('people', (_all, joined, left) => {
     refreshLights();
     if (entered) {
-      for (const p of joined) {
+      for (const p of joined.slice(0, 4)) {
         if (p.id === sky.uid) continue;
         audio.lightJoined(p.lon);
         feed(rich(['A light appeared in ', { b: p.city }, ` · ${localTimeString(p.tz)} there`]));
       }
-      for (const p of left) {
-        if (p.id === sky.uid) continue;
+      left.forEach((p, i) => {
+        if (p.id === sky.uid) return;
         globe.dropGaze(p.id);
-        feed(rich(['The light in ', { b: p.city }, ' went out']), true);
+        if (i < 4) feed(rich(['The light in ', { b: p.city }, ' went out']), true);
         // they become an echo straight away
         echoes.unshift({ lat: p.lat, lon: p.lon, place: p.city, last_seen: new Date().toISOString() });
-      }
+      });
+      if (echoes.length > 400) echoes.length = 400;
       if (left.length) { if (selection?.id.startsWith('echo:')) closeCard(); refreshLights(); }
     }
+    for (const p of left) { wavedBy.delete(p.id); wavedAt.delete(p.id); }
     if (selection?.type === 'light' && !selection.id.startsWith('echo:') && !sky.people.has(selection.id)) closeCard();
     updateArrivalCount();
   });
@@ -541,31 +651,49 @@ function wireSky() {
   sky.on('gaze', (g) => { if (g.id !== sky.uid && sky.people.has(g.id)) globe.setGazes([g]); });
 
   sky.on('wave', (w) => {
-    if (w.from === sky.uid) return;
     const toMe = w.to === sky.uid && entered;
-    const { landed } = globe.wave({ lat: w.lat, lon: w.lon }, toMe ? me : { lat: w.tlat, lon: w.tlon });
+    if (!toMe && !w.target) return;
+    const from = w.from;
+    const { landed } = globe.wave({ lat: from.lat, lon: from.lon }, toMe ? me : w.target!);
     if (!toMe) return;
-    wavedBy.set(w.from, Date.now());
+    wavedBy.set(from.id, Date.now());
+    // if this tab is in the background, say so in the tab title until they come back
+    if (document.hidden) document.title = `● Someone in ${from.city} waved at you`;
     void landed.then(() => {
-      audio.waveIn(w.lon);
-      const p = sky.people.get(w.from);
-      if (selection?.id === w.from) renderCard();
+      audio.waveIn(from.lon);
+      if (selection?.id === from.id) renderCard();
       toast(
-        rich([{ b: `Someone in ${w.city} waved at you.` }, { small: `It is ${localTimeString(w.tz)} there · ${formatKm(greatCircleKm(me.lat, me.lon, w.lat, w.lon))} away` }]),
-        { ms: 14000, action: p ? { label: 'Wave back', run: () => { select({ type: 'light', id: p.id }); void doWave(p); } } : undefined },
+        rich([{ b: `Someone in ${from.city} waved at you.` }, { small: `It is ${localTimeString(from.tz)} there · ${formatKm(greatCircleKm(me.lat, me.lon, from.lat, from.lon))} away` }]),
+        { ms: 14000, action: { label: 'Wave back', run: () => { const p = sky.people.get(from.id); if (p) { select({ type: 'light', id: p.id }); void doWave(p); } } } },
       );
     });
   });
 
-  sky.on('thread', (t, msg) => {
-    if (msg && sky.uid && (msg.a === sky.uid || msg.b === sky.uid)) {
-      if (msg.b === sky.uid) return; // I created it; handled where the wave resolved
-      marks.threads.add(t.id);
-      // let the other person's arc land first
-      setTimeout(() => addThread(t, true, { mine: true, other: t.b_place }), 1800);
-      return;
-    }
-    setTimeout(() => addThread(t, true), msg ? 1800 : 2400);
+  // Threads only ever come from the database. If one ends where I am, ask the server whether it is mine.
+  sky.on('thread', (t) => {
+    if (threads.has(t.id)) return;
+    const near = (lat: number, lon: number) => Math.abs(lat - me.lat) < 0.005 && Math.abs(lon - me.lon) < 0.005;
+    const maybeMine = entered && (near(t.a_lat, t.a_lon) || near(t.b_lat, t.b_lon));
+    setTimeout(async () => {
+      if (threads.has(t.id)) return;
+      if (maybeMine) {
+        const mk = await sky.marks().catch(() => null);
+        if (threads.has(t.id)) return;
+        if (mk?.threads.includes(t.id)) {
+          marks.threads.add(t.id);
+          addThread(t, true, { mine: true, other: near(t.a_lat, t.a_lon) ? t.b_place : t.a_place });
+          return;
+        }
+      }
+      addThread(t, true);
+    }, 2000);
+  });
+
+  sky.on('ripple', (from) => {
+    if (!entered) return;
+    globe.ripple(from.lat, from.lon);
+    audio.ringSegment(Math.round(((from.lon + 180) / 360) * 23));
+    feed(rich(['A ripple from ', { b: from.city }]));
   });
 
   sky.on('lantern', (l, fresh) => {
@@ -676,7 +804,7 @@ async function enter() {
 function boot() {
   const canvas = $('sky') as unknown as HTMLCanvasElement;
   try {
-    globe = new Globe(canvas, { lowPower, reducedMotion });
+    globe = new Globe(canvas, { lowPower, reducedMotion, fixedQuality: /[?&]hq/.test(location.search) });
   } catch (e) {
     console.error(e);
     document.body.append(h('div', { class: 'fallback' }, h('div', {}, h('h1', {}, 'One Sky'), h('p', {}, 'This device couldn’t draw the Earth (WebGL is unavailable). Try another browser, or turn on hardware acceleration.'))));
@@ -694,7 +822,15 @@ function boot() {
   buildRingStrip(); renderYou(); renderCensus(); updateArrivalCount();
 
   globe.onFrame(updateLabels);
-  globe.onTap = (pick) => { if (!entered || isModalOpen()) return; select(pick); };
+  globe.onTap = (pick, ev) => {
+    if (!entered || isModalOpen()) return;
+    const hadSelection = !!selection;
+    select(pick);
+    if (!pick && !hadSelection) {
+      const mine = globe.project(me.lat, me.lon);
+      if (mine.visible && Math.hypot(mine.x - ev.x, mine.y - ev.y) < 30) doRipple(); else showSpot(ev.x, ev.y);
+    } else spot = null;
+  };
   globe.onHover = (pick, ev) => {
     const tip = $('tip');
     canvas.classList.toggle('is-point', !!pick && entered);
@@ -719,13 +855,20 @@ function boot() {
     if (k === 'ArrowLeft') globe.nudge(-6, 0); else if (k === 'ArrowRight') globe.nudge(6, 0);
     else if (k === 'ArrowUp') globe.nudge(0, 5); else if (k === 'ArrowDown') globe.nudge(0, -5);
     else if (k === '+' || k === '=') globe.zoom(0.88); else if (k === '-' || k === '_') globe.zoom(1.14);
-    else if (k === 'Escape') closeCard(); else return;
+    else if (k === 'r' || k === 'R') doRipple();
+    else if (k === 'Escape') { stopDrift(); closeCard(); } else return;
     e.preventDefault();
   });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !isModalOpen()) closeCard(); });
 
   $('btn-enter').addEventListener('click', () => void enter());
-  $('btn-lantern').addEventListener('click', openComposer);
+  $('btn-lantern').addEventListener('click', () => { stopDrift(); openComposer(); });
+  $('btn-ripple').addEventListener('click', doRipple);
+  $('btn-drift').addEventListener('click', () => { if (drift) { stopDrift(); closeCard(); } else startDrift(); });
+  canvas.addEventListener('pointerdown', stopDrift);
+  canvas.addEventListener('wheel', stopDrift, { passive: true });
+  setInterval(sunNews, 70000);
+  setTimeout(sunNews, 26000);
   $('btn-move').addEventListener('click', openMove);
   $('btn-about').addEventListener('click', openAbout);
   $('btn-postcard').addEventListener('click', () => void openPostcard());
@@ -734,7 +877,8 @@ function boot() {
     store.set('onesky.muted', audio.muted ? '1' : '0');
     $('btn-sound').setAttribute('aria-pressed', String(!audio.muted));
   });
-  document.addEventListener('visibilitychange', () => { if (document.hidden) audio.suspend(); else { audio.resume(); void refreshWorld(); } });
+  const baseTitle = document.title;
+  document.addEventListener('visibilitychange', () => { if (document.hidden) audio.suspend(); else { document.title = baseTitle; audio.resume(); void refreshWorld(); } });
 
   // The button unlocks as soon as the Earth can be drawn; the network may still be arriving.
   void globe.ready.then(() => $('btn-enter').removeAttribute('disabled'), () => $('btn-enter').removeAttribute('disabled'));

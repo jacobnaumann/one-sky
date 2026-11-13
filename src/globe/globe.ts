@@ -49,7 +49,7 @@ interface Arc {
   dying?: number;
 }
 
-export interface GlobeOptions { lowPower?: boolean; reducedMotion?: boolean }
+export interface GlobeOptions { lowPower?: boolean; reducedMotion?: boolean; fixedQuality?: boolean }
 
 export class Globe {
   readonly canvas: HTMLCanvasElement;
@@ -101,7 +101,13 @@ export class Globe {
   private sunDir = new THREE.Vector3(1, 0, 0);
   private sunClock = 0;
   private pointerNdc: { x: number; y: number } | null = null;
-  private yShift = 0; // view offset in px (shifts globe up on small screens)
+  private ripO = Array.from({ length: 6 }, () => new THREE.Vector3(0, 1, 0));
+  private ripT = [-1, -1, -1, -1, -1, -1];
+  private yShift = 0;
+  private perfN = 0;
+  private perfT = 0;
+  private stage = 0; // 0 full, 1 lower resolution, 2 no bloom
+  private maxDpr = 2; // view offset in px (shifts globe up on small screens)
 
   onTap: (pick: Pick | null, ev: { x: number; y: number }) => void = () => {};
   onHover: (pick: Pick | null, ev: { x: number; y: number }) => void = () => {};
@@ -162,6 +168,7 @@ export class Globe {
       uniforms: {
         uDay: { value: day }, uNight: { value: night }, uWater: { value: water }, uClouds: { value: clouds },
         uSun: { value: this.sunDir }, uTime: { value: 0 }, uReveal: { value: 0 },
+        uRipO: { value: this.ripO }, uRipT: { value: this.ripT },
       },
     });
     const seg = this.opts.lowPower ? 64 : 128;
@@ -334,6 +341,8 @@ export class Globe {
   wave(a: LatLon, b: LatLon): { seconds: number; landed: Promise<void> } {
     const { curve, ang } = this.makeCurve(a, b, 0.22);
     const seconds = this.opts.reducedMotion ? 0.6 : 1.5 + ang * 0.75;
+    // never let a flood of waves build unbounded geometry
+    if (this.arcs.filter((x) => x.kind === 'wave').length >= 24) return { seconds: 0, landed: Promise.resolve() };
     let done!: () => void;
     const landed = new Promise<void>((r) => (done = r));
     this.addArc(curve, 'wave', seconds, new THREE.Color(1.0, 0.86, 0.62), done);
@@ -376,6 +385,15 @@ export class Globe {
     return arc;
   }
 
+  /** A ring of light that spreads over the whole Earth from one point. */
+  ripple(lat: number, lon: number) {
+    let slot = this.ripT.findIndex((t) => t < 0);
+    if (slot < 0) slot = this.ripT.indexOf(Math.max(...this.ripT));
+    const p = latLonToVec3(lat, lon, 1);
+    this.ripO[slot].set(p[0], p[1], p[2]);
+    this.ripT[slot] = 0;
+  }
+
   flyTo(lat: number, lon: number, dist = this.targetDist, ms = 1800): Promise<void> {
     if (this.opts.reducedMotion) ms = Math.min(ms, 300);
     if (this.fly) this.fly.resolve();
@@ -400,7 +418,7 @@ export class Globe {
   }
   revealAll() { this.revealTarget = 1; }
 
-  homeDist() { return this.aspect() < 0.8 ? 4.4 : 3.3; }
+  homeDist() { return this.aspect() < 0.8 ? 5.3 : 3.3; }
   private aspect() { return this.canvas.clientWidth / Math.max(1, this.canvas.clientHeight); }
 
   setYShift(px: number) { this.yShift = px; this.applyViewOffset(); }
@@ -411,7 +429,7 @@ export class Globe {
   project(lat: number, lon: number, r = R_LIGHT): { x: number; y: number; visible: boolean } {
     const p = latLonToVec3(lat, lon, r);
     const v = new THREE.Vector3(p[0], p[1], p[2]);
-    const visible = v.dot(this.camera.position) > r * r * 1.0 + 0.02;
+    const visible = v.dot(this.camera.position) / (r * this.dist) > 1 / this.dist + 0.10;
     v.project(this.camera);
     return { x: (v.x * 0.5 + 0.5) * this.canvas.clientWidth, y: (-v.y * 0.5 + 0.5) * this.canvas.clientHeight, visible };
   }
@@ -545,7 +563,7 @@ export class Globe {
   resize() {
     const w = this.canvas.clientWidth || window.innerWidth;
     const h = this.canvas.clientHeight || window.innerHeight;
-    const dpr = Math.min(window.devicePixelRatio || 1, this.opts.lowPower ? 1.25 : 2);
+    const dpr = Math.min(window.devicePixelRatio || 1, this.opts.lowPower ? 1.25 : this.maxDpr);
     this.renderer.setPixelRatio(dpr);
     this.renderer.setSize(w, h, false);
     this.camera.aspect = w / h;
@@ -570,8 +588,10 @@ export class Globe {
   private frame() {
     if (!this.running) return;
     const now = performance.now();
-    const dt = Math.min(0.05, (now - this.last) / 1000);
+    const raw = (now - this.last) / 1000;
+    const dt = Math.min(0.05, raw);
     this.last = now;
+    this.watchPerformance(raw);
     this.time += dt;
     const t = this.time;
 
@@ -619,13 +639,28 @@ export class Globe {
       const u = this.ringMats[i].uniforms;
       u.uLit.value += ((this.ringLit[i] ? 1 : 0) - u.uLit.value) * (1 - Math.pow(0.02, dt));
       u.uFlash.value *= Math.pow(0.18, dt);
-      u.uReveal.value = dotReveal;
+      u.uReveal.value = dotReveal * (0.22 + 0.78 * clamp((Math.abs(this.camLat) - 3) / 16, 0, 1));
     }
+
+    for (let i = 0; i < 6; i++) if (this.ripT[i] >= 0) { this.ripT[i] += dt; if (this.ripT[i] > 5.2) this.ripT[i] = -1; }
 
     this.updateArcs(dt, t, dotReveal);
     this.updateDots(dt, t);
     for (const cb of this.frameCbs) cb(dt, t);
     this.render();
+  }
+
+  /** If the device can't hold a smooth frame rate, trade resolution and then bloom for speed. */
+  private watchPerformance(raw: number) {
+    if (this.opts.fixedQuality || this.stage >= 2 || raw > 0.5 || this.reveal < 0.9) return;
+    this.perfN++; this.perfT += raw;
+    if (this.perfN < 150) return;
+    const avg = this.perfT / this.perfN;
+    this.perfN = 0; this.perfT = 0;
+    if (avg < 0.037) return; // slower than ~27 fps (a 30 fps cap alone does not trigger this)
+    this.stage++;
+    if (this.stage === 1) { this.maxDpr = 1.25; this.resize(); }
+    else { this.composer = null; this.maxDpr = 1; this.resize(); }
   }
 
   private updateArcs(dt: number, t: number, reveal: number) {
@@ -703,7 +738,7 @@ export class Globe {
       const r = this.lanternRadius(l.id);
       const p = latLonToVec3(l.lat, l.lon, 1);
       const g = clamp(Math.log2(1 + l.warmth) / 5, 0, 1);
-      put(p[0] * r, p[1] * r, p[2] * r, 46 + g * 26, hash01(l.id), l.mine ? KIND.lanternMine : KIND.lantern, g);
+      put(p[0] * r, p[1] * r, p[2] * r, 62 + g * 26, hash01(l.id), l.mine ? KIND.lanternMine : KIND.lantern, g);
       if (tn < 2048) {
         teth.setXYZ(tn * 2, p[0] * 1.002, p[1] * 1.002, p[2] * 1.002);
         teth.setXYZ(tn * 2 + 1, p[0] * (r - 0.006), p[1] * (r - 0.006), p[2] * (r - 0.006));

@@ -61,9 +61,9 @@ const MIN_ATTACK = 0.006; // seconds; nothing ever starts faster than this
 const LEAD = 0.03; // schedule slightly ahead of currentTime to avoid late starts
 const T60 = 6.908; // ln(1000): time-constant → 60 dB decay time
 
-const MASTER_TRIM = 0.75;
+const MASTER_TRIM = 0.62;
 const WET_LEVEL = 0.55;
-const BED_LEVEL = 0.055; // × ~0.53 RMS of the summed drone voices ≈ 0.029 RMS ≈ -31 dBFS
+const BED_LEVEL = 0.075;
 const BED_FADE_IN = 6;
 
 interface Partial {
@@ -168,6 +168,7 @@ export class AudioEngine {
   private disposed = false;
   private warmStep = 0;
   private lastTick = -1;
+  private heat: Record<string, { t: number; h: number }> = {};
 
   get started(): boolean {
     return this._started;
@@ -281,7 +282,7 @@ export class AudioEngine {
     const t = this.now();
     if (t === null) return;
     const m = lonToNote(lon);
-    this.note({ hz: midiToHz(m), at: t, peak: 0.07 * eq(m), attack: 0.008, decay: 3, pan: lonPan(lon), send: 0.55, partials: BELL });
+    this.note({ hz: midiToHz(m), at: t, peak: 0.155 * eq(m) * this.crowd('join', t), attack: 0.008, decay: 3, pan: lonPan(lon), send: 0.55, partials: BELL });
   }
 
   /**
@@ -306,12 +307,12 @@ export class AudioEngine {
     const p2 = lonPan(toLon) * 0.6;
     const f1 = midiToHz(n1);
     const f2 = midiToHz(n2);
-    this.note({ hz: f1, at: t, peak: 0.09, attack: 0.008, decay: 1.6, pan: p1, send: 0.5, partials: BELL });
+    this.note({ hz: f1, at: t, peak: 0.12, attack: 0.008, decay: 1.6, pan: p1, send: 0.5, partials: BELL });
     this.note({
-      hz: f1, at: t + 0.02, peak: 0.022, attack: travel, decay: 0.5,
+      hz: f1, at: t + 0.02, peak: 0.03, attack: travel, decay: 0.5,
       glideTo: f2, glideTime: travel, pan: p1, panTo: p2, panTime: travel, send: 0.9,
     });
-    this.note({ hz: f2, at: t + travel, peak: 0.11, attack: 0.008, decay: 2.8, pan: p2, send: 0.6, partials: BELL });
+    this.note({ hz: f2, at: t + travel, peak: 0.15, attack: 0.008, decay: 2.8, pan: p2, send: 0.6, partials: BELL });
   }
 
   /**
@@ -326,9 +327,9 @@ export class AudioEngine {
     const t = this.now();
     if (t === null) return;
     const pan = lonPan(fromLon) * 0.35;
-    this.note({ hz: midiToHz(69), at: t, peak: 0.14, attack: 0.007, decay: 2.2, pan, send: 0.45, partials: CHIME });
-    this.note({ hz: midiToHz(74), at: t + 0.19, peak: 0.155, attack: 0.007, decay: 3.4, pan, send: 0.5, partials: CHIME });
-    this.note({ hz: midiToHz(62), at: t + 0.19, peak: 0.04, attack: 0.03, decay: 2.4, pan, send: 0.4 });
+    this.note({ hz: midiToHz(69), at: t, peak: 0.25, attack: 0.01, decay: 2.2, pan, send: 0.45, partials: CHIME });
+    this.note({ hz: midiToHz(74), at: t + 0.19, peak: 0.28, attack: 0.01, decay: 3.4, pan, send: 0.5, partials: CHIME });
+    this.note({ hz: midiToHz(62), at: t + 0.19, peak: 0.07, attack: 0.03, decay: 2.4, pan, send: 0.4 });
   }
 
   /**
@@ -349,7 +350,7 @@ export class AudioEngine {
       : d < 0.35 ? [50, 57, 66, 69, 74]
       : d < 0.65 ? [50, 57, 64, 66, 71, 76]
       : [38, 45, 50, 57, 66, 71, 76, 81];
-    const peak = 0.13 / Math.sqrt(notes.length);
+    const peak = 0.155 / Math.sqrt(notes.length);
     const gap = 0.07 + 0.05 * d;
     const width = 0.2 + 0.5 * d;
     notes.forEach((m, i) => {
@@ -372,11 +373,11 @@ export class AudioEngine {
   lantern(): void {
     const t = this.now();
     if (t === null) return;
-    this.noise({ at: t, peak: 0.03, attack: 0.35, decay: 1.1, filter: 'bandpass', freq: 1200, freqTo: 4500, sweep: 0.9, q: 1.2, send: 0.8 });
+    this.noise({ at: t, peak: 0.06, attack: 0.35, decay: 1.1, filter: 'bandpass', freq: 1200, freqTo: 4500, sweep: 0.9, q: 1.2, send: 0.8 });
     const run = [74, 78, 81, 83, 86, 88];
     run.forEach((m, i) => {
       this.note({
-        hz: midiToHz(m), at: t + 0.05 + i * 0.075, peak: 0.045 - i * 0.0034,
+        hz: midiToHz(m), at: t + 0.05 + i * 0.075, peak: 0.1 - i * 0.0075,
         attack: 0.012, decay: 1.5, pan: -0.35 + i * 0.14, send: 0.85,
       });
     });
@@ -390,8 +391,8 @@ export class AudioEngine {
   lanternOpen(): void {
     const t = this.now();
     if (t === null) return;
-    this.noise({ at: t, peak: 0.035, attack: MIN_ATTACK, decay: 0.07, filter: 'highpass', freq: 3500, q: 0.7, send: 0.3 });
-    this.note({ hz: midiToHz(78), at: t + 0.012, peak: 0.045, attack: 0.01, decay: 1.6, send: 0.6, partials: BELL });
+    this.noise({ at: t, peak: 0.07, attack: MIN_ATTACK, decay: 0.07, filter: 'highpass', freq: 3500, q: 0.7, send: 0.3 });
+    this.note({ hz: midiToHz(78), at: t + 0.012, peak: 0.12, attack: 0.01, decay: 1.6, send: 0.6, partials: BELL });
   }
 
   /**
@@ -403,8 +404,8 @@ export class AudioEngine {
     if (t === null) return;
     const m = [62, 66, 69][this.warmStep % 3]!;
     this.warmStep++;
-    this.note({ hz: midiToHz(m), at: t, peak: 0.085, attack: 0.007, decay: 0.9, send: 0.35, type: 'triangle' });
-    this.note({ hz: midiToHz(m - 12), at: t, peak: 0.045, attack: 0.012, decay: 1.2, send: 0.3 });
+    this.note({ hz: midiToHz(m), at: t, peak: 0.125, attack: 0.007, decay: 0.9, send: 0.35, type: 'triangle' });
+    this.note({ hz: midiToHz(m - 12), at: t, peak: 0.065, attack: 0.012, decay: 1.2, send: 0.3 });
   }
 
   /**
@@ -418,7 +419,7 @@ export class AudioEngine {
     if (t === null) return;
     const i = Number.isFinite(index) ? clamp(Math.round(index), 0, 23) : 0;
     const m = SCALE[Math.floor(i / 2) + (i % 2 ? 2 : 0)]!;
-    this.note({ hz: midiToHz(m), at: t, peak: 0.1 * eq(m), attack: 0.008, decay: 2.8, pan: ((i - 11.5) / 11.5) * 0.6, send: 0.6, partials: BELL });
+    this.note({ hz: midiToHz(m), at: t, peak: 0.165 * eq(m) * this.crowd('ring', t), attack: 0.008, decay: 2.8, pan: ((i - 11.5) / 11.5) * 0.6, send: 0.6, partials: BELL });
   }
 
   /**
@@ -433,18 +434,18 @@ export class AudioEngine {
   ringComplete(): void {
     const t = this.now();
     if (t === null) return;
-    this.note({ hz: midiToHz(50), at: t, peak: 0.045, attack: 1.5, hold: 2.6, decay: 2.5, pan: -0.2, send: 0.5, type: 'triangle' });
-    this.note({ hz: midiToHz(57), at: t, peak: 0.035, attack: 1.5, hold: 2.6, decay: 2.5, pan: 0.2, send: 0.5, type: 'triangle' });
+    this.note({ hz: midiToHz(50), at: t, peak: 0.055, attack: 1.5, hold: 2.6, decay: 2.5, pan: -0.2, send: 0.5, type: 'triangle' });
+    this.note({ hz: midiToHz(57), at: t, peak: 0.043, attack: 1.5, hold: 2.6, decay: 2.5, pan: 0.2, send: 0.5, type: 'triangle' });
     const bell = (m: number, at: number, pan: number, decay: number): void => {
-      this.note({ hz: midiToHz(m), at, peak: 0.07 * Math.min(1, eq(m)), attack: 0.008, decay, pan, send: 0.65, partials: BELL });
+      this.note({ hz: midiToHz(m), at, peak: 0.088 * Math.min(1, eq(m)), attack: 0.008, decay, pan, send: 0.65, partials: BELL });
     };
     const up = [62, 64, 66, 69, 71, 74, 76, 78, 81, 83, 86];
     up.forEach((m, i) => bell(m, t + i * 0.17, -0.6 + (i / (up.length - 1)) * 1.2, 2.2));
     const down = [86, 81, 83, 78, 81, 76, 78, 74, 76, 71, 74, 69];
     down.forEach((m, i) => bell(m, t + 1.95 + i * 0.2, (i % 2 ? -1 : 1) * (0.55 - i * 0.03), 2.0));
-    this.note({ hz: midiToHz(50), at: t + 4.45, peak: 0.05, attack: 0.03, decay: 3.2, send: 0.5, type: 'triangle' });
+    this.note({ hz: midiToHz(50), at: t + 4.45, peak: 0.06, attack: 0.03, decay: 3.2, send: 0.5, type: 'triangle' });
     [62, 69, 74, 78].forEach((m, i) => {
-      this.note({ hz: midiToHz(m), at: t + 4.45 + i * 0.06, peak: 0.065, attack: 0.008, decay: 3.2, pan: -0.3 + i * 0.2, send: 0.7, partials: BELL });
+      this.note({ hz: midiToHz(m), at: t + 4.45 + i * 0.06, peak: 0.08, attack: 0.008, decay: 3.2, pan: -0.3 + i * 0.2, send: 0.7, partials: BELL });
     });
   }
 
@@ -457,7 +458,7 @@ export class AudioEngine {
     if (t === null) return;
     if (this.lastTick >= 0 && t - this.lastTick < 0.04 && t >= this.lastTick) return;
     this.lastTick = t;
-    this.note({ hz: midiToHz(86), at: t, peak: 0.012, attack: MIN_ATTACK, decay: 0.05, send: 0.15 });
+    this.note({ hz: midiToHz(86), at: t, peak: 0.03, attack: MIN_ATTACK, decay: 0.05, send: 0.15 });
   }
 
   /* ---------------------------------------------------------------- internals */
@@ -469,6 +470,23 @@ export class AudioEngine {
     if (ctx.state === 'closed') return null;
     const t = ctx.currentTime;
     return Number.isFinite(t) ? t + LEAD : null;
+  }
+
+  /**
+   * Crowd control for bells that can arrive in bursts (many people joining at once, a run of
+   * time zones lighting). Each call adds 1 to a "heat" that cools with a 0.5 s time constant;
+   * the returned gain is 1/sqrt(1 + 0.8 × heat before this call). A lone bell gets 1.0, the
+   * second of a pair 150 ms apart 0.79, a steady 150 ms run settles at 0.55, 30 per second
+   * at 0.27.
+   */
+  private crowd(key: string, t: number): number {
+    const c = this.heat[key] ?? (this.heat[key] = { t, h: 0 });
+    const dt = t - c.t;
+    c.h = dt >= 0 ? c.h * Math.exp(-dt / 0.5) : 0;
+    c.t = t;
+    const gain = 1 / Math.sqrt(1 + 0.8 * c.h);
+    c.h += 1;
+    return gain;
   }
 
   private wake(): void {
@@ -503,9 +521,9 @@ export class AudioEngine {
     const master = ctx.createGain();
     master.gain.value = this._muted ? 0 : 1;
     const comp = ctx.createDynamicsCompressor();
-    comp.threshold.value = -6;
-    comp.knee.value = 6;
-    comp.ratio.value = 6;
+    comp.threshold.value = -9;
+    comp.knee.value = 5;
+    comp.ratio.value = 16;
     comp.attack.value = 0.005;
     comp.release.value = 0.3;
     const trim = ctx.createGain();
@@ -583,13 +601,13 @@ export class AudioEngine {
 
     const voices: [number, OscillatorType, number, number, number, number, number][] = [
       // midi, type, detune cents, amp, LFO period s, LFO depth, pan
-      [38, 'sine', 0, 0.5, 43, 0.25, 0],
-      [45, 'sine', 0, 0.34, 31, 0.35, 0],
-      [50, 'triangle', -5, 0.26, 23, 0.4, -0.35],
-      [50, 'triangle', 5, 0.26, 29, 0.4, 0.35],
-      [57, 'sine', 3, 0.2, 37, 0.45, 0.15],
-      [64, 'sine', 0, 0.1, 53, 0.6, -0.2],
-      [66, 'sine', -2, 0.06, 61, 0.8, 0.25],
+      [38, 'sine', 0, 0.3, 43, 0.25, 0],
+      [45, 'sine', 0, 0.3, 31, 0.35, 0],
+      [50, 'triangle', -5, 0.3, 23, 0.4, -0.35],
+      [50, 'triangle', 5, 0.3, 29, 0.4, 0.35],
+      [57, 'sine', 3, 0.26, 37, 0.45, 0.15],
+      [64, 'sine', 0, 0.14, 53, 0.6, -0.2],
+      [66, 'sine', -2, 0.09, 61, 0.8, 0.25],
     ];
     voices.forEach(([m, type, cents, amp, period, depth, pan], i) => {
       const osc = ctx.createOscillator();
@@ -705,8 +723,8 @@ export class AudioEngine {
         pan: lonPan(light.lon), send: 0.6, partials: BELL,
       });
     };
-    play(t, 0.035);
-    if (n >= 12 && Math.random() < 0.35) play(t + 0.25 + Math.random() * 0.45, 0.024);
+    play(t, 0.05);
+    if (n >= 12 && Math.random() < 0.35) play(t + 0.25 + Math.random() * 0.45, 0.034);
   }
 
   /* ---- voices ---- */

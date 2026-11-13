@@ -20,6 +20,8 @@ uniform sampler2D uClouds;
 uniform vec3 uSun;
 uniform float uTime;
 uniform float uReveal;
+uniform vec3 uRipO[6];
+uniform float uRipT[6];
 varying vec2 vUv;
 varying vec3 vN;
 varying vec3 vPos;
@@ -77,6 +79,20 @@ void main() {
   vec3 haze = mix(vec3(0.07, 0.11, 0.25), vec3(0.30, 0.56, 1.0), sunSide);
   haze = mix(haze, vec3(1.0, 0.50, 0.24), term * 0.55);
   col += haze * fr * (0.22 + 0.78 * sunSide) * 0.85;
+
+  // Ripples: a ring of light travelling outward over the surface from someone's light,
+  // all the way round to the far side of the planet.
+  for (int i = 0; i < 6; i++) {
+    float age = uRipT[i];
+    if (age < 0.0) continue;
+    float ang = acos(clamp(dot(N, uRipO[i]), -1.0, 1.0));
+    float r = age * 0.62;
+    float life = clamp(1.0 - age / 5.2, 0.0, 1.0);
+    float lead = exp(-pow((ang - r) / 0.011, 2.0));
+    float wake = exp(-pow((ang - r + 0.05) / 0.045, 2.0)) * 0.16 * step(ang, r);
+    float echo = exp(-pow((ang - r * 0.74) / 0.008, 2.0)) * 0.32;
+    col += vec3(1.0, 0.72, 0.40) * (lead + wake + echo) * life * 0.85;
+  }
 
   col *= uReveal;
   gl_FragColor = vec4(col, 1.0);
@@ -219,16 +235,21 @@ void main() {
     float ring = exp(-pow((d - 0.72) / 0.10, 2.0));
     col = vec3(0.55, 0.80, 1.0) * (disc * disc * 0.05 + ring * 0.07);
   } else if (vKind < 5.5) {
-    // A lantern: a small paper body with a flame inside.
-    vec2 q = p * vec2(1.0, 0.86) + vec2(0.0, 0.04);
-    float body = sdRoundBox(q, vec2(0.20, 0.27), 0.10);
-    float paper = smoothstep(0.03, -0.05, body);
-    float flame = exp(-dot(q * vec2(4.6, 3.2) + vec2(0.0, 0.25), q * vec2(4.6, 3.2) + vec2(0.0, 0.25)) * 1.6);
-    float halo = exp(-d * 3.3) * 0.50;
-    vec3 warm = mix(vec3(1.0, 0.42, 0.12), vec3(1.0, 0.62, 0.22), vGlow);
-    if (vKind > 4.5) warm = mix(warm, vec3(1.0, 0.86, 0.60), 0.45);
-    col = warm * (paper * (0.75 + 0.6 * vGlow) + halo * (0.6 + 0.8 * vGlow)) + vec3(1.0, 0.92, 0.72) * flame * 1.8;
-    col *= 0.92 + 0.5 * (vPulse - 1.0);
+    // A lantern: a paper body, dark caps top and bottom, a flame glowing through.
+    vec2 q = p - vec2(0.0, -0.02);
+    float body = sdRoundBox(q, vec2(0.25, 0.35), 0.13);
+    float inside = smoothstep(0.025, -0.025, body);
+    vec2 f = (q - vec2(0.0, 0.10)) * vec2(3.0, 2.3);
+    float flame = exp(-dot(f, f));
+    vec3 paper = mix(vec3(0.80, 0.20, 0.04), vec3(1.0, 0.62, 0.22), flame);
+    if (vKind > 4.5) paper = mix(paper, vec3(1.0, 0.90, 0.66), 0.35);
+    float cap = smoothstep(0.255, 0.30, abs(q.y));
+    float ribs = 0.90 + 0.10 * cos(q.y * 42.0);
+    float halo = exp(-d * 3.4) * (0.22 + 0.5 * vGlow);
+    col = paper * inside * ribs * (1.0 - 0.80 * cap) * (0.62 + 0.45 * vGlow)
+        + vec3(1.0, 0.95, 0.80) * inside * exp(-dot(f, f) * 6.0) * 0.35
+        + vec3(1.0, 0.50, 0.16) * halo;
+    col *= 0.94 + 0.6 * (vPulse - 1.0);
   } else {
     // Comet head of a travelling wave.
     float core = exp(-d * d * 40.0);
@@ -286,7 +307,7 @@ varying float vFacing;
 void main() {
   float ends = smoothstep(0.0, 0.04, vUv.x) * smoothstep(1.0, 0.96, vUv.x);
   vec3 off = vec3(0.50, 0.62, 0.90) * 0.085;
-  vec3 on = vec3(1.0, 0.70, 0.34) * (0.95 + uFlash * 3.0);
+  vec3 on = vec3(1.0, 0.70, 0.34) * (0.80 + uFlash * 3.0);
   vec3 col = mix(off, on, uLit) * ends * (0.35 + 0.65 * vFacing) * uReveal;
   gl_FragColor = vec4(col, 1.0);
   #include <tonemapping_fragment>
