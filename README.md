@@ -25,7 +25,9 @@ You are not reading a feed. You are looking at the planet and seeing who else is
 | **Tap anywhere** | Any spot on Earth tells you its local time and sky. The feed tells you where the sun is rising and where night is falling, right now. |
 | **Postcard** | Save the Earth as you see it, with the day's numbers. |
 
-![Waving across the planet](docs/thread.png)
+![A thread forms between two people](docs/thread.png)
+
+![Reading a lantern](docs/lantern.png)
 
 ## Honest by design
 
@@ -50,6 +52,17 @@ You are not reading a feed. You are looking at the planet and seeing who else is
 - **Hosting:** GitHub Pages, built by GitHub Actions on every push to `main`.
 
 Project memory — architecture, operations, decisions and a dated log — lives in [`vault/`](vault/index.md).
+
+## What has been checked
+
+- 127 unit tests (sun position, great-circle maths, time zones, text filter, sound engine).
+- 171 live database checks (row-level security, every function's limits and rejections).
+- Four multi-visitor browser tests — two people meet, wave, thread; a third sees it; lanterns; a wave left for
+  someone who has gone is delivered when they return — passing against production in Chromium and locally in
+  Firefox and WebKit.
+- Sound levels measured from the real audio output (no clipping, no clicks, all pitches in key).
+- Steady 60 fps on an integrated Intel GPU at desktop, 2x and phone resolutions.
+- Not checked: real iPhones or Android phones, and nobody has listened to the sound with their own ears yet.
 
 ## Run it
 
