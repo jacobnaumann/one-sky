@@ -107,7 +107,7 @@ export function feed(content: Node, cool = false, go?: () => void) {
   }
   list.append(li);
   while (list.children.length > 4) list.firstElementChild!.remove();
-  setTimeout(() => li.remove(), go ? 16000 : 10500);
+  setTimeout(() => li.remove(), go ? 40000 : 10500);
 }
 
 /** Count a number up or down to a new value. */

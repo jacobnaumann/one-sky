@@ -57,10 +57,10 @@ export async function makePostcard(shot: string, info: PostcardInfo): Promise<st
 
   // numbers, bottom left
   const cols: [string, string][] = [
-    [String(info.lights), info.lights === 1 ? 'light awake' : 'lights awake'],
+    [String(info.lights), info.lights === 1 ? 'light here now' : 'lights here now'],
     [`${info.zones}/24`, 'time zones lit'],
     [info.threads.toLocaleString('en-US'), info.threads === 1 ? 'thread' : 'threads'],
-    [Math.round(info.km).toLocaleString('en-US'), 'km connected'],
+    [Math.round(info.km).toLocaleString('en-US'), 'km of thread'],
   ];
   let x = M;
   const shown = cols.filter(([n]) => n !== '0').slice(0, portrait ? 2 : 4);

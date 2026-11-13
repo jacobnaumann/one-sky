@@ -148,7 +148,7 @@ test('a wave left for an echo is delivered when that person comes back', async (
   await b.evaluate((id) => (window as any).__onesky.select({ type: 'light', id }), key);
   await expect(b.locator('#card h2')).toHaveText('Tokyo');
   await b.locator('#card button.btn.primary').click();
-  await expect(b.locator('#card .note')).toContainText('waiting for them');
+  await expect(b.locator('#card .note')).toContainText('Your wave is waiting');
 
   // A comes back and is told
   const a2 = await ctxA.newPage();

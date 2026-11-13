@@ -556,7 +556,7 @@ export class Globe {
           const r = el.getBoundingClientRect();
           const x = e.clientX - r.left, y = e.clientY - r.top;
           this.vLat = this.vLon = 0;
-          this.onTap(this.pick(x, y, e.pointerType === 'mouse' ? 22 : 34), { x: e.clientX, y: e.clientY });
+          this.onTap(this.pick(x, y, e.pointerType === 'mouse' ? 30 : 38), { x: e.clientX, y: e.clientY });
         }
       }
       this.pinchStart = 0;
