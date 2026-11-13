@@ -19,7 +19,9 @@ You are not reading a feed. You are looking at the planet and seeing who else is
 | **Ripple** | Send a ring of light around the whole planet from where you are. Everyone sees and hears it. |
 | **Release a lantern** | One question a day, the same for the whole world. Your answer (140 characters) floats over your city for 48 hours. Anyone can read it, warm it, and — where the browser has a built-in translator — read it in their own language. |
 | **Close the ring** | Around the Earth is a ring of 24 segments, one per time zone. Each lights when someone from that zone arrives. The world has until midnight UTC to light them all. |
-| **Drift** | Press play and the Earth carries you from lantern to lantern. |
+| **Leave a wave** | Faint blue lights are echoes of people who were here in the last two days. Leave one a wave; they receive it the next time they arrive. |
+| **Drift** | Press Drift and the Earth carries you from lantern to lantern, each one set large across the sky. |
+| **Watch a day pass** | Sweep the sun through the next 24 hours and watch night cross the planet. |
 | **Tap anywhere** | Any spot on Earth tells you its local time and sky. The feed tells you where the sun is rising and where night is falling, right now. |
 | **Postcard** | Save the Earth as you see it, with the day's numbers. |
 

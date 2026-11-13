@@ -73,6 +73,7 @@ export class Globe {
   private lanterns: LanternDot[] = [];
   private gazes = new Map<string, { lat: number; lon: number; v: THREE.Vector3; t: THREE.Vector3; seen: number }>();
   private comets: { v: THREE.Vector3; size: number }[] = [];
+  private pings: { v: THREE.Vector3; born: number }[] = [];
   private frameCbs: ((dt: number, t: number) => void)[] = [];
   private opts: GlobeOptions;
 
@@ -393,6 +394,13 @@ export class Globe {
     return arc;
   }
 
+  /** A short bloom of light where something just arrived. */
+  ping(lat: number, lon: number) {
+    const p = latLonToVec3(lat, lon, R_LIGHT);
+    this.pings.push({ v: new THREE.Vector3(p[0], p[1], p[2]), born: this.time });
+    if (this.pings.length > 24) this.pings.shift();
+  }
+
   /** A ring of light that spreads over the whole Earth from one point. */
   ripple(lat: number, lon: number) {
     let slot = this.ripT.findIndex((t) => t < 0);
@@ -697,7 +705,7 @@ export class Globe {
         u.uDrawn.value = 1;
         u.uFade.value = (k < 1 ? 1 : clamp(1 - (k - 1) * 2.2, 0, 1)) * reveal;
         if (k < 1) this.comets.push({ v: a.curve.getPoint(head), size: 46 });
-        if (k >= 1 && a.done) { a.done(); a.done = undefined; }
+        if (k >= 1 && a.done) { const end = a.curve.getPoint(1); this.pings.push({ v: end.clone(), born: t }); a.done(); a.done = undefined; }
         if (k > 1.5) { this.removeArc(i); continue; }
       } else {
         const k = a.travel > 0 ? clamp(age / a.travel, 0, 1) : 1;
@@ -767,6 +775,12 @@ export class Globe {
       }
     }
     for (const c of this.comets) put(c.v.x, c.v.y, c.v.z, c.size, 0, KIND.comet, 1);
+    for (let i = this.pings.length - 1; i >= 0; i--) {
+      const k = (t - this.pings[i].born) / 1.6;
+      if (k >= 1) { this.pings.splice(i, 1); continue; }
+      const e = 1 - Math.pow(1 - k, 3);
+      put(this.pings[i].v.x, this.pings[i].v.y, this.pings[i].v.z, 44 + e * 120, 0, KIND.gaze, 1.6 + 3.2 * (1 - k) * (1 - k));
+    }
 
     pos.needsUpdate = size.needsUpdate = phase.needsUpdate = kind.needsUpdate = glow.needsUpdate = true;
     this.dotGeo.setDrawRange(0, n);

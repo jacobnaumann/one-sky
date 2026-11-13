@@ -501,6 +501,8 @@ function addThread(t: Thread, animate: boolean, opts: { mine?: boolean; other?: 
   threads.set(t.id, t);
   globe.addThread(t.id, { lat: t.a_lat, lon: t.a_lon }, { lat: t.b_lat, lon: t.b_lon }, animate);
   if (!animate) return;
+  globe.ping(t.a_lat, t.a_lon);
+  setTimeout(() => globe.ping(t.b_lat, t.b_lon), 1500);
   stats.threads_total += 1; stats.km_total += t.km; renderStats();
   if (opts.mine) {
     audio.thread(t.km);
@@ -1132,12 +1134,16 @@ function boot() {
   setInterval(() => { if (entered) void sky.checkIn().catch(() => {}); }, 10 * 60 * 1000);
 
   // share where I am looking, a few times a second, only when it changes
-  let lastGaze = { lat: 999, lon: 999 };
+  let lastGaze = { lat: 999, lon: 999 }, lastGazeAt = 0;
   setInterval(() => {
-    if (!entered || document.hidden || others().length === 0) return;
+    const n = others().length;
+    if (!entered || document.hidden || n === 0) return;
+    // the more people are here, the less often each one reports, so the whole room stays
+    // under about 8 messages a second however large it gets
+    if (Date.now() - lastGazeAt < 300 + 120 * n) return;
     const g = globe.gaze();
     if (Math.abs(g.lat - lastGaze.lat) + Math.abs(g.lon - lastGaze.lon) < 0.6) return;
-    lastGaze = g;
+    lastGaze = g; lastGazeAt = Date.now();
     sky.sendGaze(g.lat, g.lon);
   }, 280);
 }

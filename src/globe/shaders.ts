@@ -234,7 +234,7 @@ void main() {
     // Where someone else is looking.
     float disc = smoothstep(1.0, 0.0, d);
     float ring = exp(-pow((d - 0.72) / 0.10, 2.0));
-    col = vec3(0.55, 0.80, 1.0) * (disc * disc * 0.05 + ring * 0.07);
+    col = mix(vec3(0.55, 0.80, 1.0), vec3(1.0, 0.78, 0.50), step(1.5, vGlow)) * (disc * disc * 0.05 + ring * 0.07) * vGlow;
   } else if (vKind < 5.5) {
     // A lantern: a paper body, dark caps top and bottom, a flame glowing through.
     vec2 q = p - vec2(0.0, -0.02);
