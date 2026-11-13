@@ -537,7 +537,7 @@ export class Globe {
       if (this.pointers.size === 2) {
         const [a, b] = [...this.pointers.values()];
         const d = Math.hypot(a.x - b.x, a.y - b.y);
-        if (this.pinchStart > 0) this.targetDist = clamp(this.pinchDist * (this.pinchStart / d), 1.85, 6.5);
+        if (this.pinchStart > 0) { this.targetDist = clamp(this.pinchDist * (this.pinchStart / d), 1.85, 6.5); this.onUserMove(); }
         return;
       }
       this.moved += Math.abs(dx) + Math.abs(dy);
@@ -583,9 +583,9 @@ export class Globe {
   }
 
   nudge(dLon: number, dLat: number) {
-    this.camLon += dLon; this.camLat = clamp(this.camLat + dLat, -84, 84); this.lastInput = performance.now();
+    this.camLon += dLon; this.camLat = clamp(this.camLat + dLat, -84, 84); this.lastInput = performance.now(); this.onUserMove();
   }
-  zoom(f: number) { this.targetDist = clamp(this.targetDist * f, 1.85, 6.5); this.lastInput = performance.now(); }
+  zoom(f: number) { this.targetDist = clamp(this.targetDist * f, 1.85, 6.5); this.lastInput = performance.now(); this.onUserMove(); }
 
   resize() {
     const w = this.canvas.clientWidth || window.innerWidth;

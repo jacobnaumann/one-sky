@@ -85,9 +85,16 @@ export function toast(content: Node, opts: { ms?: number; plain?: boolean; stick
   // a sticky toast stays until it is answered or closed
   if (opts.sticky) el.append(h('button', { class: 'toast-close', 'aria-label': 'Dismiss', onclick: dismiss }, '×'));
   box.prepend(el);
-  // make room by dropping the oldest toast that is not waiting for an answer
+  // Room for three. At most two may be sticky; the newest toast is never the one removed.
+  const kids = () => [...box.children].filter((c) => c !== el).reverse(); // oldest first
+  while (box.querySelectorAll('.toast.sticky').length > 2) {
+    const oldSticky = kids().find((c) => c.classList.contains('sticky'));
+    if (!oldSticky) break;
+    oldSticky.remove();
+  }
   while (box.children.length > 3) {
-    const old = [...box.children].reverse().find((c) => !c.classList.contains('sticky')) ?? box.lastElementChild!;
+    const old = kids().find((c) => !c.classList.contains('sticky')) ?? kids()[0];
+    if (!old) break;
     old.remove();
   }
   if (!opts.sticky) setTimeout(dismiss, opts.ms ?? 6000);

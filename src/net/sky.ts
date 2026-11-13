@@ -24,7 +24,7 @@ export interface Stats {
   threads_total: number; km_total: number; lanterns_48h: number; lights_today: number; lights_48h: number;
   zones_today: number[]; day: string;
 }
-export interface WaveMsg { from: Person; to: string; target: { lat: number; lon: number } | null }
+export interface WaveMsg { from: Person; to: string; target: { lat: number; lon: number } | null; /** for waves to me: the database confirms this person really waved */ verified: boolean }
 export interface Marks { lanterns: string[]; warmed: string[]; threads: string[] }
 
 type Events = {
@@ -58,6 +58,48 @@ export class Sky {
   private goneTimer: ReturnType<typeof setTimeout> | undefined;
   private lastWaveFrom = new Map<string, number>();
   private lastRippleFrom = new Map<string, number>();
+  private lastRemoteRipple = 0;
+  private arcBudget: number[] = [];
+  private rippleBudget: number[] = [];
+  private wavers: { at: number; ids: Set<string> } | null = null;
+  private waversPending: Promise<Set<string> | null> | null = null;
+  private hiddenQueue = new Set<string>();
+  private hiddenTimer: ReturnType<typeof setTimeout> | undefined;
+  private hiddenLastQuery = 0;
+
+  /** Sliding-window budget: true if another event is allowed. */
+  private take(bucket: number[], max: number, windowMs: number): boolean {
+    const now = Date.now();
+    while (bucket.length && now - bucket[0] > windowMs) bucket.shift();
+    if (bucket.length >= max) return false;
+    bucket.push(now);
+    return true;
+  }
+
+  /** Who has really waved at me in the last ten minutes, according to the database. Null if it can't say. */
+  private fetchWavers(): Promise<Set<string> | null> {
+    if (this.wavers && Date.now() - this.wavers.at < 1500) return Promise.resolve(this.wavers.ids);
+    this.waversPending ??= (async () => {
+      try {
+        const { data, error } = await this.db.rpc('my_wavers');
+        if (error || !Array.isArray(data)) return null;
+        const ids = new Set<string>((data as unknown[]).filter((x): x is string => typeof x === 'string'));
+        this.wavers = { at: Date.now(), ids };
+        return ids;
+      } catch { return null; } finally { setTimeout(() => { this.waversPending = null; }, 0); }
+    })();
+    return this.waversPending;
+  }
+  private async reallyWaved(id: string): Promise<boolean> {
+    for (const wait of [0, 1500]) {
+      if (wait) await new Promise((r) => setTimeout(r, wait));
+      const ids = await this.fetchWavers();
+      if (ids === null) return true; // the check itself is unavailable: don't lose real waves over it
+      if (ids.has(id)) return true;
+      this.wavers = null;
+    }
+    return false;
+  }
   private hiddenChecked = new Map<string, number>();
   /** ids the UI currently shows; hidden-lantern hints for anything else are ignored */
   knownLantern: (id: string) => boolean = () => false;
@@ -75,7 +117,14 @@ export class Sky {
   }
 
   /** Sign in anonymously (or reuse the stored session) and join the sky as a watcher. */
-  async connect(): Promise<void> {
+  private connecting: Promise<void> | null = null;
+  /** Safe to call repeatedly and concurrently. */
+  connect(): Promise<void> {
+    if (this.ch) return Promise.resolve();
+    this.connecting ??= this.doConnect().finally(() => { this.connecting = null; });
+    return this.connecting;
+  }
+  private async doConnect(): Promise<void> {
     if (this.ch) return;
     if (!this.authWatched) {
       this.authWatched = true;
@@ -86,7 +135,8 @@ export class Sky {
         const old = this.ch; this.ch = null;
         if (old) void this.db.removeChannel(old);
         if (this.online) { this.online = false; this.emit('status', false); }
-        setTimeout(() => void this.connect().catch(() => {}), 1500);
+        const again = (n: number) => { void this.connect().catch(() => setTimeout(() => again(n + 1), Math.min(30000, 2000 * 2 ** n))); };
+        setTimeout(() => again(0), 1500);
       });
     }
     const { data } = await this.db.auth.getSession();
@@ -122,16 +172,27 @@ export class Sky {
       if (now - (this.lastWaveFrom.get(pair) ?? 0) < 3000) return;
       if (this.lastWaveFrom.size > 4000) this.lastWaveFrom.clear();
       this.lastWaveFrom.set(pair, now);
-      const to = payload.to === this.uid ? null : this.people.get(payload.to);
-      if (payload.to !== this.uid && !to) return;
-      this.emit('wave', { from, to: payload.to, target: to ? { lat: to.lat, lon: to.lon } : null });
+      const toMe = payload.to === this.uid;
+      const to = toMe ? null : this.people.get(payload.to);
+      if (!toMe && !to) return;
+      if (!toMe) {
+        // other people's waves are only decoration: at most 10 arcs in any 10 seconds
+        if (!this.take(this.arcBudget, 10, 10000)) return;
+        this.emit('wave', { from, to: payload.to, target: { lat: to!.lat, lon: to!.lon }, verified: false });
+        return;
+      }
+      // A wave to me shows a banner and plays a sound, and a broadcast can be forged by anyone,
+      // so ask the database whether this person really waved before believing it.
+      void this.reallyWaved(from.id).then((verified) => this.emit('wave', { from, to: payload.to, target: null, verified }));
     });
     ch.on('broadcast', { event: 'ripple' }, ({ payload }) => {
       // only the sender's id is trusted; one ripple per sender every 4 seconds
       const from = payload && typeof payload.from === 'string' ? this.people.get(payload.from) : undefined;
       if (!from || from.id === this.uid) return;
       const now = Date.now();
-      if (now - (this.lastRippleFrom.get(from.id) ?? 0) < 4000) return;
+      if (now - (this.lastRippleFrom.get(from.id) ?? 0) < 15000) return;
+      if (now - this.lastRemoteRipple < 2500 || !this.take(this.rippleBudget, 6, 30000)) return;
+      this.lastRemoteRipple = now;
       this.lastRippleFrom.set(from.id, now);
       this.emit('ripple', from);
     });
@@ -173,7 +234,7 @@ export class Sky {
       if (!place) continue;
       if (Math.abs(m.lat - place.lat) > JITTER_DEGREES + 0.01 || lonGap(m.lon, place.lon) > JITTER_DEGREES + 0.01) continue;
       const since = num(m.since, Date.now());
-      next.set(id, { id, lat: m.lat, lon: m.lon, city: place.city, country: place.country, tz: place.tz, since: Math.min(since, Date.now()) });
+      next.set(id, { id, lat: m.lat, lon: m.lon, city: place.city, country: place.country, tz: place.tz, since: Math.max(Date.now() - 48 * 3600000, Math.min(since, Date.now())) });
     }
     // Presence can flicker (a re-track or a brief reconnect shows as leave-then-join).
     // Keep someone for a few seconds after they vanish before calling them gone.
@@ -220,9 +281,9 @@ export class Sky {
   async wave(to: Person): Promise<Thread | null> {
     const m = this.me;
     if (!m || !this.uid || !this.ch) return null;
-    void this.ch.send({ type: 'broadcast', event: 'wave', payload: { from: this.uid, to: to.id } });
     const { data, error } = await this.db.rpc('send_wave', { p_to: to.id, p_lat: m.lat, p_lon: m.lon, p_place: m.city, p_tz: m.tz });
     if (error) throw new Error(error.message);
+    void this.ch.send({ type: 'broadcast', event: 'wave', payload: { from: this.uid, to: to.id } });
     const t = this.cleanThread((data as any)?.thread);
     return t;
   }
@@ -295,14 +356,26 @@ export class Sky {
   }
 
   /** A hidden-lantern broadcast is only a hint (anyone can send one); confirm against the database. */
-  private async confirmHidden(id: string) {
+  private confirmHidden(id: string) {
     if (!this.knownLantern(id)) return;
     const now = Date.now();
     if (now - (this.hiddenChecked.get(id) ?? 0) < 60000) return;
-    if (this.hiddenChecked.size > 500) this.hiddenChecked.clear();
+    if (this.hiddenChecked.size > 600) { const first = this.hiddenChecked.keys().next().value; if (first) this.hiddenChecked.delete(first); }
     this.hiddenChecked.set(id, now);
-    const { data, error } = await this.db.from('lanterns').select('id').eq('id', id).limit(1);
-    if (!error && data && data.length === 0) this.emit('lanternHidden', id);
+    this.hiddenQueue.add(id);
+    if (this.hiddenTimer) return;
+    this.hiddenTimer = setTimeout(() => void this.flushHidden(), Math.max(1000, 5000 - (now - this.hiddenLastQuery)));
+  }
+  private async flushHidden() {
+    this.hiddenTimer = undefined;
+    const batch = [...this.hiddenQueue].slice(0, 100);
+    this.hiddenQueue.clear();
+    if (!batch.length) return;
+    this.hiddenLastQuery = Date.now();
+    const { data, error } = await this.db.from('lanterns').select('id').in('id', batch);
+    if (error || !data) return;
+    const still = new Set((data as { id: string }[]).map((r) => r.id));
+    for (const id of batch) if (!still.has(id)) this.emit('lanternHidden', id);
   }
 
   private cleanLantern(r: any): Lantern | null {

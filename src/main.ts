@@ -51,11 +51,14 @@ let question = questionForDay(today);
 let selection: Pick | null = null;
 const wavedAt = new Map<string, number>();      // uid → when I last waved at them
 const wavedBy = new Map<string, number>();      // uid → when they last waved at me
+const waveBudget: number[] = [];
+let lastRippleLine = 0;
 const waveToasts = new Map<string, () => void>(); // uid → dismiss their pending "waved at you" banner
 let ringWasComplete = false;
 const threadedWith = new Set<string>();     // uids I already share a thread with
 const threadedAt = new Map<string, number>(); // uid → when our thread formed (this session)
 let lastUserMove = 0;
+let selectedAt = 0;
 let dismissCoach: (() => void) | null = null; // the first-visit hint goes away once the visitor acts
 const nearPt = (a: { lat: number; lon: number }, lat: number, lon: number) => Math.abs(a.lat - lat) < 0.005 && Math.abs(a.lon - lon) < 0.005;
 let pendingEchoWaves: import('./net/sky').EchoWave[] = [];
@@ -100,9 +103,17 @@ function syncThreaded() {
   }
 }
 
+/** Echoes worth showing: not me, and not anyone who is here right now. */
+function shownEchoes(): Echo[] {
+  const live = others();
+  const hit = (a: { lat: number; lon: number }, e: Echo) => Math.abs(a.lat - e.lat) < 0.02 && Math.abs(a.lon - e.lon) < 0.02;
+  return echoes.filter((e) => !hit(me, e) && !live.some((p) => hit(p, e)));
+}
+
 /** Go to the most recent echo and open it. */
 function findEcho() {
-  const e = echoes.find((x) => x.eid) ?? echoes[0];
+  const list = shownEchoes();
+  const e = list.find((x) => x.eid) ?? list[0];
   if (e) select({ type: 'light', id: echoKey(e) });
 }
 
@@ -127,7 +138,8 @@ function refreshLanterns() {
 function renderCensus() {
   const n = liveCount();
   const el = $('census');
-  const sig = `${sky.uid ? 1 : 0}|${n}|${entered}|${stats.lights_48h}|${echoes.length}`;
+  const ne = shownEchoes().length;
+  const sig = `${sky.uid ? 1 : 0}|${n}|${entered}|${stats.lights_48h}|${ne}`;
   if (el.dataset.sig === sig) return;
   el.dataset.sig = sig;
   el.replaceChildren();
@@ -136,9 +148,10 @@ function renderCensus() {
   el.classList.toggle('go', entered && n > 1);
   el.append(h('b', {}, live));
   if (stats.lights_48h >= 25) el.append(h('span', { class: 'wide' }, ` · ${stats.lights_48h.toLocaleString('en-US')} in the last two days`));
-  else if (echoes.length >= 1) {
-    const link = h('span', { class: 'go', role: 'button', tabindex: '0' }, `${echoes.length} ${echoes.length === 1 ? 'echo' : 'echoes'} of earlier visitors`);
+  else if (ne >= 1) {
+    const link = h('span', { class: 'go', role: 'button', tabindex: '0' }, `${ne} ${ne === 1 ? 'echo' : 'echoes'} of earlier visitors`);
     link.addEventListener('click', (e) => { e.stopPropagation(); if (entered) findEcho(); });
+    link.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); if (entered) findEcho(); } });
     el.append(h('span', { class: 'wide' }, ' · ', link));
   }
 }
@@ -341,12 +354,14 @@ function selectionPoint(): { lat: number; lon: number; r?: number } | null {
 const card = $('card');
 let repaintLantern: (() => void) | null = null;
 function closeCard() {
-  if (selection && innerWidth <= 1000 && !drift && entered) void globe.flyTo(me.lat + (me.lat >= 0 ? 9 : -9), me.lon, globe.homeDist(), 1300);
+  if (selection && innerWidth <= 1000 && !drift && entered && lastUserMove < selectedAt) void globe.flyTo(me.lat + (me.lat >= 0 ? 9 : -9), me.lon, globe.homeDist(), 1300);
   if (drift) stopDrift(); repaintLantern = null; selection = null; card.hidden = true; card.replaceChildren(); globe.autoRotate = true; }
 
 function select(pick: Pick | null, fly = true) {
   if (!pick) { closeCard(); return; }
   dismissCoach?.(); dismissCoach = null;
+  if (drift) stopDrift();
+  selectedAt = Date.now();
   selection = pick;
   globe.autoRotate = false;
   const pt = selectionPoint();
@@ -384,6 +399,7 @@ function renderPersonCard(id: string) {
   const note = h('p', { class: 'note' }, joined ? 'A thread of light joins you two.' : theyWaved ? 'They waved at you. Wave back and a thread of light will join you.' : 'If they wave back, a thread of light stays between you.');
   const btn = h('button', { class: joined ? 'btn ghost' : 'btn primary', disabled: cooling }, cooling ? 'Wave sent' : joined ? 'Wave again' : theyWaved ? 'Wave back' : 'Wave');
   btn.addEventListener('click', () => { void doWave(p); });
+  if (cooling) setTimeout(() => { if (btn.isConnected) { btn.disabled = false; btn.textContent = threadedWith.has(id) ? 'Wave again' : Date.now() - (wavedBy.get(id) ?? 0) < 600000 ? 'Wave back' : 'Wave again'; } }, Math.max(200, 8100 - (Date.now() - (wavedAt.get(id) ?? 0))));
   const sk = skyState(p.lat, p.lon, new Date());
   card.append(
     h('div', { class: `skybar sky-${sk.replace(' ', '-')}`, role: 'img', 'aria-label': `Their sky: ${sk}` }),
@@ -404,8 +420,8 @@ function renderPersonCard(id: string) {
 function renderEchoCard(id: string) {
   const e = echoById(id);
   if (!e) { closeCard(); return; }
-  const left = store.get('onesky.echoWaved') ?? '';
-  const already = !!e.eid && left.includes(e.eid);
+  const leftAt = (eid: string) => { const m = (store.get('onesky.echoWaved') ?? '').match(new RegExp(eid + '@(\\d+)')); return m ? +m[1] : 0; };
+  const already = !!e.eid && leftAt(e.eid) > Date.parse(e.last_seen);
   const note = h('p', { class: 'note' }, already
     ? 'Your wave is waiting for them. They will find it when they return.'
     : e.eid ? 'They’ve left. Leave a wave and they’ll find it when they return.'
@@ -420,7 +436,7 @@ function renderEchoCard(id: string) {
       audio.waveOut(me.lon, e.lon, seconds);
       try {
         await sky.waveEcho(e.eid!);
-        store.set('onesky.echoWaved', (left + ',' + e.eid).slice(-2000));
+        store.set('onesky.echoWaved', ((store.get('onesky.echoWaved') ?? '') + ',' + e.eid + '@' + Date.now()).slice(-2400));
         note.textContent = 'Your wave is waiting. They’ll see it the moment they return.';
         feed(rich(['Your wave is waiting in ', { b: e.place }, ' for when they return']));
       } catch (err: any) {
@@ -496,7 +512,7 @@ function renderLanternCard(id: string) {
     tiny.append(rb);
   }
   card.append(
-    h('p', { class: 'eyebrow' }, (mine ? 'Your lantern' : l.seeded ? 'A lantern from One Sky' : 'A lantern') + (drift ? ` · ${((drift.i - 1) % drift.order.length) + 1} / ${drift.order.length}` : '')),
+    h('p', { class: 'eyebrow' }, (mine ? 'Your lantern' : l.seeded ? 'A lantern from One Sky' : 'A lantern') + (drift ? ` · ${((drift.shown - 1) % drift.order.length) + 1} / ${drift.order.length}` : '')),
     h('p', { class: 'sub' }, `over ${l.place} · ${localTimeString(l.tz)} there now`),
     ...(q ? [h('p', { class: 'q', style: 'margin-top:14px' }, q.text)] : []),
     body, translated, actions, tiny,
@@ -529,6 +545,7 @@ async function doWave(p: Person) {
   if (!sky.online) { toast(rich(['The sky is out of reach right now. Try again in a moment.']), { plain: true }); return; }
   if (Date.now() - (wavedAt.get(p.id) ?? 0) < 8000) return;
   wavedAt.set(p.id, Date.now());
+  waveToasts.get(p.id)?.(); waveToasts.delete(p.id);
   const { seconds, landed } = globe.wave(me, p);
   audio.waveOut(me.lon, p.lon, seconds);
   feed(rich(['Your wave is crossing ', { b: formatKm(greatCircleKm(me.lat, me.lon, p.lat, p.lon)) }, ` to ${p.city}…`]));
@@ -561,7 +578,7 @@ function addThread(t: Thread, animate: boolean, opts: { mine?: boolean; other?: 
     setTimeout(() => showThread(t), 400);
     toast(rich([{ b: `A thread now joins you and someone in ${opts.other}.` }, { small: `${formatKm(t.km)} of light between you. It stays on the Earth for everyone to see.` }]), { ms: 14000 });
   } else if (entered) {
-    feed(rich(['A thread now joins ', { b: t.a_place }, ' and ', { b: t.b_place }, ` · ${formatKm(t.km)}`]), false, () => { closeCard(); void globe.flyTo((t.a_lat + t.b_lat) / 2, t.a_lon, undefined, 1400); });
+    feed(rich(['A thread now joins ', { b: t.a_place }, ' and ', { b: t.b_place }, ` · ${formatKm(t.km)}`]), false, () => { closeCard(); showThread(t); });
   }
 }
 
@@ -593,11 +610,13 @@ function doRipple() {
 
 // ───────────────────────── drift (a slow tour of the lanterns) ─────────────────────────
 
-let drift: { timer: number; order: string[]; i: number } | null = null;
+let drift: { timer: number; order: string[]; i: number; shown: number } | null = null;
+let driftStep: () => void = () => {};
 function stopDrift() {
   if (!drift) return;
   clearTimeout(drift.timer);
   drift = null;
+  if (selection?.type === 'lantern' && !card.hidden) setTimeout(() => { if (!drift && selection?.type === 'lantern') renderCard(); }, 0);
   $('btn-drift').setAttribute('aria-pressed', 'false');
   $('app').classList.remove('is-drifting');
 }
@@ -609,7 +628,7 @@ function startDrift() {
   const here = globe.gaze();
   let start = 0, bd = 1e9;
   order.forEach((id, i) => { const l = lanterns.get(id)!; const d = greatCircleKm(here.lat, here.lon, l.lat, l.lon); if (d < bd) { bd = d; start = i; } });
-  drift = { timer: 0, order, i: start };
+  drift = { timer: 0, order, i: start, shown: 0 };
   $('btn-drift').setAttribute('aria-pressed', 'true');
   $('app').classList.add('is-drifting');
   const step = () => {
@@ -618,7 +637,7 @@ function startDrift() {
     while (tries++ < drift.order.length && !lanterns.has(drift.order[drift.i % drift.order.length])) drift.i++;
     const id = drift.order[drift.i % drift.order.length];
     if (!lanterns.has(id)) { stopDrift(); return; }
-    drift.i++;
+    drift.i++; drift.shown++;
     selection = { type: 'lantern', id };
     globe.autoRotate = false;
     const l = lanterns.get(id)!;
@@ -626,6 +645,7 @@ function startDrift() {
     renderCard();
     drift.timer = window.setTimeout(step, 8500);
   };
+  driftStep = step;
   step();
 }
 
@@ -684,6 +704,7 @@ const LANTERN_ERRORS: Record<string, string> = {
   rate_limited: 'One lantern every 30 seconds, five a day. Let this one drift a while.',
   contact: 'Lanterns can’t carry handles, emails or phone numbers. Keep it to the moment.',
   not_authenticated: 'The sky is out of reach right now. Try again in a moment.',
+  sky_busy: 'The sky is very full right now. Try again in a little while.',
 };
 
 function openComposer() {
@@ -703,6 +724,7 @@ function openComposer() {
     };
     ta.addEventListener('input', sync);
     const submit = async () => {
+      if (send.hasAttribute('disabled')) return;
       const res = cleanLantern(ta.value);
       if (!res.ok) { err.textContent = reasonMessage(res.reason); return; }
       send.setAttribute('disabled', ''); send.textContent = 'Releasing…';
@@ -855,7 +877,8 @@ function wireSky() {
       if (echoes.length > 400) echoes.length = 400;
       if (left.length) refreshLights();
     }
-    for (const p of left) { wavedBy.delete(p.id); wavedAt.delete(p.id); waveToasts.get(p.id)?.(); waveToasts.delete(p.id); }
+    for (const p of left) { wavedBy.delete(p.id); wavedAt.delete(p.id); waveToasts.get(p.id)?.(); waveToasts.delete(p.id); threadedWith.delete(p.id); threadedAt.delete(p.id); }
+    if (left.length) syncThreaded();
     if (selection?.type === 'light' && !selection.id.startsWith('echo:') && !sky.people.has(selection.id)) closeCard();
     updateArrivalCount();
   });
@@ -867,12 +890,19 @@ function wireSky() {
     if (!toMe && !w.target) return;
     const from = w.from;
     const { landed } = globe.wave({ lat: from.lat, lon: from.lon }, toMe ? me : w.target!);
-    if (!toMe) return;
+    if (!toMe || !w.verified) return;
+    // the same person waving again within a minute, or a burst of waves, gets an arc and nothing more
+    const recent = Date.now() - (wavedBy.get(from.id) ?? 0) < 60000;
+    const nowMs = Date.now();
+    while (waveBudget.length && nowMs - waveBudget[0] > 10000) waveBudget.shift();
+    const flooded = waveBudget.length >= 4;
+    if (!flooded) waveBudget.push(nowMs);
     wavedBy.set(from.id, Date.now());
     // if this tab is in the background, say so in the tab title until they come back
     if (document.hidden) document.title = `● Someone in ${from.city} waved at you`;
     void landed.then(() => {
-      audio.waveIn(from.lon);
+      if (flooded) return;
+      if (!recent) audio.waveIn(from.lon);
       if (selection?.id === from.id) renderCard();
       const goTo = () => { const p = sky.people.get(from.id); if (p) select({ type: 'light', id: p.id }); };
       if (threadedWith.has(from.id)) {
@@ -906,7 +936,7 @@ function wireSky() {
           marks.threads.add(t.id);
           const mineIsA = near(t.a_lat, t.a_lon);
           const oLat = mineIsA ? t.b_lat : t.a_lat, oLon = mineIsA ? t.b_lon : t.a_lon;
-          for (const p of others()) if (Math.abs(p.lat - oLat) < 0.005 && Math.abs(p.lon - oLon) < 0.005) { threadedWith.add(p.id); threadedAt.set(p.id, Date.now()); waveToasts.get(p.id)?.(); }
+          for (const p of others()) if (Math.abs(p.lat - oLat) < 0.005 && Math.abs(p.lon - oLon) < 0.005) { threadedWith.add(p.id); threadedAt.set(p.id, Date.now()); waveToasts.get(p.id)?.(); waveToasts.delete(p.id); }
           addThread(t, true, { mine: true, other: mineIsA ? t.b_place : t.a_place });
           return;
         }
@@ -919,7 +949,7 @@ function wireSky() {
     if (!entered) return;
     globe.ripple(from.lat, from.lon);
     audio.ringSegment(Math.round(((from.lon + 180) / 360) * 23));
-    feed(rich(['A ripple from ', { b: from.city }]), false, () => { if (sky.people.has(from.id)) select({ type: 'light', id: from.id }); });
+    if (Date.now() - lastRippleLine > 10000) { lastRippleLine = Date.now(); feed(rich(['A ripple from ', { b: from.city }]), false, () => { if (sky.people.has(from.id)) select({ type: 'light', id: from.id }); }); }
   });
 
   sky.on('lantern', (l, fresh) => {
@@ -938,7 +968,7 @@ function wireSky() {
   });
   sky.on('lanternHidden', (id) => {
     lanterns.delete(id); refreshLanterns();
-    if (selection?.type === 'lantern' && selection.id === id) closeCard();
+    if (selection?.type === 'lantern' && selection.id === id) { if (drift) { clearTimeout(drift.timer); drift.timer = window.setTimeout(driftStep, 50); } else closeCard(); }
   });
   sky.on('zone', (z) => lightZone(z, true));
 }
@@ -953,7 +983,12 @@ async function loadWorld() {
   for (const z of zs) zonesLit.set(z.zone, z);
   ringWasComplete = zonesLit.size === 24;
   refreshLanterns(); refreshLights(); renderStats(); renderRing(false); syncThreaded();
-  pendingEchoWaves = await sky.collectEchoWaves().catch(() => []);
+  // the server hands these over once; keep them for this tab until they have been shown
+  let stashed: import('./net/sky').EchoWave[] = [];
+  try { stashed = JSON.parse(sessionStorage.getItem('onesky.pendingWaves') ?? '[]'); } catch { /* ignore */ }
+  const fresh = await sky.collectEchoWaves().catch(() => []);
+  pendingEchoWaves = [...fresh, ...(Array.isArray(stashed) ? stashed : [])].filter((w) => w && typeof w.lat === 'number' && typeof w.lon === 'number' && typeof w.place === 'string').slice(0, 20);
+  try { sessionStorage.setItem('onesky.pendingWaves', JSON.stringify(pendingEchoWaves)); } catch { /* ignore */ }
 }
 
 let worldLoaded = false;
@@ -974,7 +1009,10 @@ async function resync() {
 async function bringUp(attempt = 0): Promise<void> {
   try {
     await sky.connect();
-    if (!worldLoaded) { await loadWorld(); worldLoaded = true; }
+    if (!worldLoaded) {
+      await loadWorld(); worldLoaded = true;
+      if (entered && !$('app').classList.contains('is-hidden')) { receiveEchoWaves(); tellWarmthSinceLastVisit(); }
+    }
     updateArrivalCount(); renderCensus();
   } catch (e) {
     console.warn('One Sky is offline', e);
@@ -987,7 +1025,15 @@ async function refreshWorld() {
   if (!sky.uid || document.hidden) return;
   const [st, es] = await Promise.all([sky.stats(), sky.echoes()]).catch(() => [null, null] as const);
   if (st) { stats = st; renderStats(); }
-  if (es) { echoes = es; if (selection?.id.startsWith('echo:') && !echoById(selection.id)) closeCard(); refreshLights(); }
+  if (es) {
+    const sel = selection?.id.startsWith('echo:') ? echoById(selection.id) : null;
+    echoes = es;
+    if (sel && !echoById(selection!.id)) {
+      const same = es.find((x) => nearPt(x, sel.lat, sel.lon));
+      if (same) { selection = { type: 'light', id: echoKey(same) }; renderCard(); } else closeCard();
+    }
+    refreshLights();
+  }
   // drop lanterns that have drifted past 48 hours
   const cutoff = Date.now() - 48 * 3600 * 1000;
   let dropped = false;
@@ -1010,6 +1056,7 @@ function rollDay(force?: string) {
 function receiveEchoWaves() {
   const waves = pendingEchoWaves;
   pendingEchoWaves = [];
+  try { sessionStorage.removeItem('onesky.pendingWaves'); } catch { /* ignore */ }
   if (!waves.length) return;
   waves.slice(0, 6).forEach((w, i) => setTimeout(() => {
     const { landed } = globe.wave({ lat: w.lat, lon: w.lon }, me);
@@ -1018,10 +1065,11 @@ function receiveEchoWaves() {
   const first = waves[0];
   const rest = waves.length - 1;
   const liveNow = () => others().find((p) => nearPt(p, first.lat, first.lon));
+  const wasLive = !!liveNow();
   const answer = () => {
     // if they are here now, wave straight back; otherwise open their echo so a wave can be left
     const live = liveNow();
-    if (live) { select({ type: 'light', id: live.id }); void doWave(live); return; }
+    if (live) { select({ type: 'light', id: live.id }); if (wasLive) void doWave(live); return; }
     const echo = echoes.find((e) => nearPt(e, first.lat, first.lon));
     if (echo) select({ type: 'light', id: echoKey(echo) });
     else void globe.flyTo(first.lat, first.lon, undefined, 1400);
@@ -1034,6 +1082,7 @@ function receiveEchoWaves() {
 
 /** On return: has anyone warmed my lanterns since I last looked? */
 function tellWarmthSinceLastVisit() {
+  if (!worldLoaded) return;
   let total = 0, n = 0, where = '';
   for (const id of marks.lanterns) { const l = lanterns.get(id); if (l) { total += l.warmth; n++; where = l.place; } }
   const seen = Number(store.get('onesky.warmthSeen') ?? 0);
@@ -1100,6 +1149,7 @@ async function enter() {
   }, reducedMotion ? 0 : 3000);
 
   await flight;
+  if (!entered) await new Promise<void>((r) => { const t = setInterval(() => { if (entered) { clearInterval(t); r(); } }, 100); });
   $('app').classList.remove('is-hidden');
   globe.canvas.focus({ preventScroll: true });
   setTimeout(tellWarmthSinceLastVisit, 4200);
@@ -1116,8 +1166,8 @@ async function enter() {
           { plain: true, sticky: true, actions: [{ label: n === 1 ? 'Meet them' : 'Meet one', run: () => { const p = sky.people.get(them.id) ?? others()[0]; if (p) select({ type: 'light', id: p.id }); } }, ...(lanterns.size ? [{ label: 'Drift', run: startDrift, quiet: true }] : [])] },
         );
       } else dismissCoach = toast(
-        rich([{ b: 'Yours is the only light here right now.' }, { small: echoes.length ? 'Send a ripple around the Earth. Or find an echo — someone who was here earlier — and leave them a wave.' : 'Send a ripple around the Earth — or invite someone and watch their light appear.' }]),
-        { plain: true, sticky: true, actions: [{ label: 'Send a ripple', run: doRipple }, ...(echoes.length ? [{ label: 'Find an echo', run: findEcho, quiet: true }] : []), { label: 'Copy link', run: () => void copyLink(), quiet: true }] },
+        rich([{ b: 'Yours is the only light here right now.' }, { small: shownEchoes().length ? 'Send a ripple around the Earth. Or find an echo — someone who was here earlier — and leave them a wave.' : 'Send a ripple around the Earth — or invite someone and watch their light appear.' }]),
+        { plain: true, sticky: true, actions: [{ label: 'Send a ripple', run: doRipple }, ...(shownEchoes().length ? [{ label: 'Find an echo', run: findEcho, quiet: true }] : []), { label: 'Copy link', run: () => void copyLink(), quiet: true }] },
       );
     }, 1600);
   }
@@ -1178,8 +1228,9 @@ function boot() {
   document.addEventListener('keydown', (e) => {
     const tgt = e.target as HTMLElement | null;
     if (isModalOpen() || e.metaKey || e.ctrlKey || e.altKey) return;
-    if (tgt && tgt !== canvas && /^(INPUT|TEXTAREA|BUTTON|A|SELECT)$/.test(tgt.tagName) && e.key !== '[' && e.key !== ']') return;
-    if (tgt && /^(INPUT|TEXTAREA)$/.test(tgt.tagName)) return;
+    const tag = tgt?.tagName ?? '';
+    if (/^(INPUT|TEXTAREA|SELECT)$/.test(tag)) return;
+    if (tgt !== canvas && (/^(BUTTON|A)$/.test(tag) || tgt?.getAttribute('role') === 'button') && (e.key === 'Enter' || e.key === ' ')) return;
     const k = e.key;
     if (k === 'ArrowLeft') globe.nudge(-6, 0); else if (k === 'ArrowRight') globe.nudge(6, 0);
     else if (k === 'ArrowUp') globe.nudge(0, 5); else if (k === 'ArrowDown') globe.nudge(0, -5);

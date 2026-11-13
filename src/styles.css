@@ -475,3 +475,13 @@ body:has(.scrim) :is(.ask, .you, .world, .tools) { opacity: 0; pointer-events: n
   .modal { padding-bottom: 28px; }
 }
 @media (hover: none) { .keys-note { display: none; } }
+
+/* regression pass */
+@media (prefers-reduced-motion: reduce) { .feed li, .feed li.go { animation: none !important; opacity: 1; transform: none; } }
+.app.is-drifting .feed li.go { pointer-events: none; }
+body:has(.scrim) :is(.ask, .you, .world, .tools) { visibility: hidden; }
+@media (max-width: 1000px) {
+  .app:has(.card:not([hidden])):not(.is-drifting) :is(.ask, .you) { visibility: hidden; }
+  .daypass { top: calc(var(--pad) + 104px + env(safe-area-inset-top)); background: rgba(0, 0, 0, 0.55); padding: 4px 14px; border-radius: 14px; z-index: 3; }
+  .offline { top: auto; bottom: calc(env(safe-area-inset-bottom) + 250px); white-space: normal; text-align: center; }
+}
