@@ -43,10 +43,12 @@ void main() {
 
   vec3 lit = day * (0.035 + 0.92 * pow(diff, 0.85));
 
-  // Sun glint on water.
+  // Sun glint on water (hidden under cloud).
+  vec4 ct0 = texture2D(uClouds, vec2(vUv.x + uTime * 0.0009, vUv.y));
+  float c0 = ct0.r * ct0.a;
   vec3 H = normalize(uSun + V);
-  float spec = pow(max(dot(N, H), 0.0), 700.0) * water;
-  lit += vec3(1.0, 0.86, 0.66) * spec * 0.26 * dayAmt;
+  float spec = pow(max(dot(N, H), 0.0), 1400.0) * water * (1.0 - c0);
+  lit += vec3(1.0, 0.86, 0.66) * spec * 0.16 * dayAmt;
   float sheen = pow(max(dot(N, H), 0.0), 9.0) * water;
   lit += vec3(0.30, 0.42, 0.60) * sheen * 0.02 * dayAmt;
 
