@@ -23,7 +23,7 @@
  * Chromium, records every sample sent to the destination and reports peak / RMS / DC /
  * clicks / spectrum per scenario. Re-run it after changing any number in here.
  * (dBFS; peak = louder channel, RMS = mean power of both channels, 100 ms windows.)
- *   bed        -32.5 RMS steady (drifts about ±2 dB with its LFOs), peak ≈ -20
+ *   bed        -32.5 RMS steady (drifts about ±3 dB over minutes with its LFOs), peak ≈ -20
  *   twinkle    -23 .. -28 peak (loudest 100 ms ≈ the bed's level: an ambient layer, not an event)
  *   events     -18 .. -12 peak, loudest 100 ms 7-11 dB above the bed
  *   waveIn     ≈ -10 peak, loudest 100 ms ≈ 15 dB above the bed: the most noticeable sound

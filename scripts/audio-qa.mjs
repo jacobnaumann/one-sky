@@ -4,11 +4,19 @@
 // ctx.destination is also recorded sample-for-sample by an AudioWorklet, and this script
 // reports levels, clicks, DC, spectrum and timing per scenario.
 //
-// Usage:  node scripts/audio-qa.mjs [--only=bed,waveIn,...] [--out=test-results/audio-qa] [--wav] [--long]
+// Usage:  node scripts/audio-qa.mjs [--only=bed,waveIn,...] [--out=test-results/audio-qa] [--wav] [--long] [--jobs=5]
 //   Needs the dev server (npm run dev) on http://localhost:5173 (override with --url=).
 //   --wav   also writes each recording as a 32-bit float WAV so a human can listen later
 //   --long  records the bed for 150 s instead of 30 s (shows the slow LFO range)
-// Exit code 1 when a hard limit is broken (clipping, peak > -3 dBFS, DC, not silent when muted).
+//   Scenarios: chain (compressor curve, make-up gain, reverb decay), bed, arrive, lightJoined,
+//   waveOut, waveIn, thread, lantern, ring, late (events scheduled behind the render clock),
+//   stress, mute, twinkle1/8/200. Only with --only=: drops, dropsQuiet (60 / 20 identical
+//   bells, every one must sound). Takes about two minutes; scenarios run in real time.
+//   Events are measured with the bed kept silent, so their own level and tail can be read
+//   down to -60 dBFS; stress and mute run over the real bed.
+// Exit code 1 when a hard limit is broken: a sample >= 1.0, peak > -3 dBFS, DC > 0.002, a
+// click, an event that makes no sound, an off-scale oscillator, bed outside -34..-26 dBFS
+// RMS, or anything audible while muted.
 import { chromium } from '@playwright/test';
 import { mkdirSync, writeFileSync } from 'node:fs';
 
