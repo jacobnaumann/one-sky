@@ -58,7 +58,8 @@ test('two visitors see each other, wave, wave back, and a third sees their threa
   // a third visitor arriving later sees the thread from the database
   const c = await visitor(browser, 'America/Sao_Paulo');
   await expect.poll(() => c.evaluate((ids) => ids.some((id: string) => (window as any).__onesky.threads.has(id)), threadsA)).toBe(true);
-  await expect(c.locator('#census')).toContainText('3 lights here now');
+  await expect(c.locator('#census')).toContainText('lights here now'); // not an exact count: real visitors may be here too
+  await expect.poll(() => c.evaluate(() => (window as any).__onesky.sky.people.size)).toBeGreaterThanOrEqual(3);
 
   // when B leaves, A sees the light go out
   await b.context().close();
@@ -154,5 +155,46 @@ test('a wave left for an echo is delivered when that person comes back', async (
   const a2 = await ctxA.newPage();
   await enter(a2);
   await expect(a2.locator('.toast', { hasText: 'While you were away, someone in Lisbon waved at you' })).toBeVisible();
+  await ctxA.close(); await b.context().close();
+});
+
+test('"Use my location" puts a light in the nearest city, and others see it there', async ({ browser }) => {
+  // A's browser reports a position in Madison, Wisconsin; the device clock says US Central (Chicago)
+  const ctxA = await browser.newContext({ timezoneId: 'America/Chicago', reducedMotion: 'reduce', geolocation: { latitude: 43.0731, longitude: -89.4012 }, permissions: ['geolocation'] });
+  const a = await ctxA.newPage();
+  await a.goto('./?low');
+  await expect(a.locator('#btn-enter')).toBeEnabled();
+  await expect.poll(() => a.evaluate(() => (window as any).__onesky.sky.online), { timeout: 30_000 }).toBe(true);
+  await a.locator('#btn-enter').click();
+  await expect(a.locator('#app')).not.toHaveClass(/is-hidden/);
+  await expect(a.locator('#you-place')).toContainText('Chicago');           // the clock's guess
+
+  await a.locator('#btn-move').click();
+  await a.getByRole('button', { name: 'Use my location' }).click();
+  await expect(a.locator('#you-place')).toHaveText('Madison, WI, United States');
+  // only the city-level position is held: within about 0.13 degrees of the city centre, not the exact point
+  const me = await a.evaluate(() => { const m = (window as any).__onesky.me; return { key: m.key, lat: m.lat, lon: m.lon }; });
+  expect(me.key).toMatch(/^g\d+$/);
+  expect(Math.abs(me.lat - 43.07)).toBeLessThan(0.14);
+  expect(Math.abs(me.lon - -89.4)).toBeLessThan(0.14);
+
+  // someone else sees that light in Madison, and the server accepts a lantern from there
+  const b = await visitor(browser, 'Europe/Lisbon');
+  const ua = await uid(a);
+  await expect.poll(() => b.evaluate((id) => (window as any).__onesky.sky.people.get(id)?.city ?? null, ua), { timeout: 30_000 }).toBe('Madison, WI');
+  await a.locator('#btn-lantern').click();
+  await a.locator('.modal textarea').fill(`[test] snow on the lake ${stamp}`);
+  await a.locator('.modal button.btn.primary').click();
+  await expect(a.locator('.toast', { hasText: 'Your lantern is aloft over Madison' })).toBeVisible();
+
+  // the choice is remembered on the next visit
+  await a.reload();
+  await expect(a.locator('#arrival-place')).toHaveText('Madison, WI');
+
+  // searching works too
+  await b.locator('#btn-move').click();
+  await b.locator('.modal input[type=search]').fill('kyoto');
+  await b.locator('.modal .places button').first().click();
+  await expect(b.locator('#you-place')).toContainText('Kyoto');
   await ctxA.close(); await b.context().close();
 });

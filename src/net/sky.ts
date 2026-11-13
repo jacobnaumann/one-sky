@@ -2,12 +2,12 @@
 // gaze + waves (broadcast), and lanterns / threads / ring (database).
 import { createClient, type RealtimeChannel, type SupabaseClient } from '@supabase/supabase-js';
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from './config';
-import { placeByTz, JITTER_DEGREES } from '../lib/tz';
+import { placeByKey, maxJitter, cityLabel } from '../lib/places';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const lonGap = (a: number, b: number) => { const d = Math.abs(a - b) % 360; return d > 180 ? 360 - d : d; };
 
-export interface Me { lat: number; lon: number; city: string; country: string; tz: string; zone: number }
+export interface Me { /** place key sent to the server: a zone name or "g" + GeoNames id */ key: string; lat: number; lon: number; city: string; country: string; tz: string; zone: number }
 export interface Person { id: string; lat: number; lon: number; city: string; country: string; tz: string; since: number }
 export interface Lantern {
   id: string; day: string; question_id: number; body: string; lat: number; lon: number;
@@ -217,8 +217,9 @@ export class Sky {
 
   private presencePayload() {
     const m = this.me!;
-    return { lat: m.lat, lon: m.lon, city: m.city, country: m.country, tz: m.tz, since: Date.now() };
+    return { pid: m.key, tz: m.key, lat: m.lat, lon: m.lon, since: Date.now() };
   }
+
 
   private syncPeople() {
     if (!this.ch) return;
@@ -230,11 +231,12 @@ export class Sky {
       if (!UUID.test(id) || next.size >= 2000) continue;
       const m = metas[0];
       if (!m || typeof m.lat !== 'number' || typeof m.lon !== 'number') continue;
-      const place = placeByTz(m.tz);
+      const place = placeByKey(m.pid ?? m.tz);
       if (!place) continue;
-      if (Math.abs(m.lat - place.lat) > JITTER_DEGREES + 0.01 || lonGap(m.lon, place.lon) > JITTER_DEGREES + 0.01) continue;
+      const box = maxJitter(place) + 0.01;
+      if (Math.abs(m.lat - place.lat) > box || lonGap(m.lon, place.lon) > box) continue;
       const since = num(m.since, Date.now());
-      next.set(id, { id, lat: m.lat, lon: m.lon, city: place.city, country: place.country, tz: place.tz, since: Math.max(Date.now() - 48 * 3600000, Math.min(since, Date.now())) });
+      next.set(id, { id, lat: m.lat, lon: m.lon, city: cityLabel(place), country: place.country, tz: place.tz, since: Math.max(Date.now() - 48 * 3600000, Math.min(since, Date.now())) });
     }
     // Presence can flicker (a re-track or a brief reconnect shows as leave-then-join).
     // Keep someone for a few seconds after they vanish before calling them gone.
@@ -264,7 +266,7 @@ export class Sky {
   async checkIn() {
     const m = this.me;
     if (!m || !this.uid) return;
-    await this.db.rpc('check_in', { p_lat: m.lat, p_lon: m.lon, p_place: m.city, p_tz: m.tz, p_zone: m.zone });
+    await this.db.rpc('check_in', { p_lat: m.lat, p_lon: m.lon, p_place: m.city, p_tz: m.key, p_zone: m.zone });
   }
 
   sendGaze(lat: number, lon: number) {
@@ -281,7 +283,7 @@ export class Sky {
   async wave(to: Person): Promise<Thread | null> {
     const m = this.me;
     if (!m || !this.uid || !this.ch) return null;
-    const { data, error } = await this.db.rpc('send_wave', { p_to: to.id, p_lat: m.lat, p_lon: m.lon, p_place: m.city, p_tz: m.tz });
+    const { data, error } = await this.db.rpc('send_wave', { p_to: to.id, p_lat: m.lat, p_lon: m.lon, p_place: m.city, p_tz: m.key });
     if (error) throw new Error(error.message);
     void this.ch.send({ type: 'broadcast', event: 'wave', payload: { from: this.uid, to: to.id } });
     const t = this.cleanThread((data as any)?.thread);
@@ -290,7 +292,7 @@ export class Sky {
 
   async releaseLantern(body: string, questionId: number): Promise<Lantern> {
     const m = this.me!;
-    const { data, error } = await this.db.rpc('release_lantern', { p_body: body, p_question_id: questionId, p_lat: m.lat, p_lon: m.lon, p_place: m.city, p_tz: m.tz });
+    const { data, error } = await this.db.rpc('release_lantern', { p_body: body, p_question_id: questionId, p_lat: m.lat, p_lon: m.lon, p_place: m.city, p_tz: m.key });
     if (error) throw new Error(error.message);
     const l = this.cleanLantern(data);
     if (!l) throw new Error('bad_response');
@@ -324,7 +326,7 @@ export class Sky {
   async waveEcho(eid: string): Promise<void> {
     const m = this.me;
     if (!m) throw new Error('not_ready');
-    const { error } = await this.db.rpc('wave_echo', { p_eid: eid, p_lat: m.lat, p_lon: m.lon, p_tz: m.tz });
+    const { error } = await this.db.rpc('wave_echo', { p_eid: eid, p_lat: m.lat, p_lon: m.lon, p_tz: m.key });
     if (error) throw new Error(error.message);
   }
   /** Waves left for me while I was away. Delivered once. */

@@ -485,3 +485,8 @@ body:has(.scrim) :is(.ask, .you, .world, .tools) { visibility: hidden; }
   .daypass { top: calc(var(--pad) + 104px + env(safe-area-inset-top)); background: rgba(0, 0, 0, 0.55); padding: 4px 14px; border-radius: 14px; z-index: 3; }
   .offline { top: auto; bottom: calc(env(safe-area-inset-bottom) + 250px); white-space: normal; text-align: center; }
 }
+
+/* Move my light: nearest-city finder */
+.locate { display: flex; align-items: center; gap: 14px; margin-top: 16px; }
+.locate .fine { margin: 0; }
+@media (max-width: 1000px) { .locate { flex-direction: column; align-items: stretch; gap: 10px; } }

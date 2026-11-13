@@ -128,6 +128,19 @@ const RAW_PLACES = JSON.parse(tzsrc.slice(rawStart, tzsrc.indexOf('];', rawStart
 const PLACES = new Map(RAW_PLACES.map(([tz, lat, lon, city]) =>
   [tz, { tz, lat, lon, city: city || tz.slice(tz.lastIndexOf('/') + 1).replace(/_/g, ' ') }]));
 
+// The client's city table (src/lib/cities.ts). A city's place key on the server is 'g' + geonameid.
+const citysrc = readFileSync(join(ROOT, 'src', 'lib', 'cities.ts'), 'utf8');
+const CITY_TZS = JSON.parse(/CITY_TZS: string\[\] = (\[[^\]]*\]);/.exec(citysrc)[1]);
+const citiesStart = citysrc.indexOf('[[', citysrc.indexOf('RAW_CITIES: RawCity[] ='));
+const RAW_CITIES = JSON.parse(citysrc.slice(citiesStart, citysrc.indexOf(']];', citiesStart) + 2));
+const cityPos = (name, cc, region = null) => {
+  const c = RAW_CITIES.find((x) => x[1] === name && x[2] === cc && (region === null || x[3] === region));
+  if (!c) throw new Error(`city not in cities.ts: ${name}, ${cc}`);
+  return { tz: `g${c[0]}`, city: c[1], lat: c[4], lon: c[5], zone: CITY_TZS[c[6]] };
+};
+const MADISON = cityPos('Madison', 'US', 'WI'); // America/Chicago
+const PUNE = cityPos('Pune', 'IN'); // Asia/Kolkata, a half-hour zone
+
 // Same arithmetic as zoneIndex() in src/lib/time.ts.
 function jsZone(tz, date = new Date()) {
   const f = new Intl.DateTimeFormat('en-US', {
@@ -352,14 +365,21 @@ async function main() {
             and (p.proconfig is null or not 'search_path=public, pg_temp' = any(p.proconfig))) as bad_path,
         (select count(*) from pg_proc p where p.pronamespace = 'public'::regnamespace and p.proname = 'send_wave') as send_wave_fns,
         (select count(*) from public.places) as places,
-        (select count(*) from public.places p where not exists (select 1 from pg_timezone_names n where n.name = p.tz)) as unknown_tz,
+        (select count(*) from public.places p where p.tz = p.zone_tz and p.jitter = 0.61::real and p.tz !~ '^g[0-9]+$') as zone_places,
+        (select count(*) from public.places p where p.tz ~ '^g[1-9][0-9]*$' and p.jitter = 0.21::real and p.zone_tz <> p.tz) as city_places,
+        (select count(distinct p.zone_tz) from public.places p where not exists (select 1 from pg_timezone_names n where n.name = p.zone_tz)) as unknown_tz,
+        (select city || '|' || country || '|' || lat || '|' || lon || '|' || zone_tz from public.places where tz = '${MADISON.tz}') as madison,
         (select schedule from cron.job where jobname = 'one-sky-prune') as prune_schedule,
         (select count(*) from cron.job where jobname = 'one-sky-prune-anon' and command like '%is_anonymous%30 days%') as anon_job,
         has_table_privilege((select username from cron.job where jobname = 'one-sky-prune-anon'), 'auth.users', 'DELETE') as anon_job_allowed,
         (select count(*) from pg_class c where c.relnamespace = 'public'::regnamespace and c.relkind = 'r' and not c.relrowsecurity) as tables_without_rls`);
     check('every SECURITY DEFINER function has search_path = public, pg_temp', h.bad_path === '0', JSON.stringify(h));
     check('send_wave has exactly one overload', h.send_wave_fns === '1', JSON.stringify(h));
-    check('places holds the 418 rows of the client table', h.places === String(PLACES.size) && PLACES.size === 418, JSON.stringify(h));
+    check('places holds the 418 zone rows of the client table (key = zone, jitter 0.61)', h.zone_places === String(PLACES.size) && PLACES.size === 418, JSON.stringify(h));
+    check('places holds the 11,585 cities of the client table (key g<geonameid>, jitter 0.21): 418 + 11,585 rows in all',
+      h.city_places === String(RAW_CITIES.length) && RAW_CITIES.length === 11585 && h.places === String(418 + 11585), JSON.stringify(h));
+    check('places: a city row carries the plain name, the country name, the client coordinates and the real zone',
+      h.madison === `Madison|United States|${MADISON.lat}|${MADISON.lon}|America/Chicago` && MADISON.zone === 'America/Chicago' && MADISON.tz === 'g5261457', JSON.stringify(h));
     check('prune job runs every 10 minutes', h.prune_schedule === '*/10 * * * *', JSON.stringify(h));
     check('daily anonymous-user prune job exists and its role may delete from auth.users',
       h.anon_job === '1' && h.anon_job_allowed === 'true', JSON.stringify(h));
@@ -377,7 +397,7 @@ async function main() {
       d.anon === 'false' && d.authed === 'false' && gone.n === '0', JSON.stringify({ d, gone }));
 
     // Zones: the server must agree with the client's zoneIndex() for every place.
-    const zones = sqlRows(`select tz, public._zone_for_tz(tz, null) as z from public.places order by tz`);
+    const zones = sqlRows(`select tz, public._zone_for_tz(zone_tz, null) as z from public.places where tz = zone_tz order by tz`);
     const z = Object.fromEntries(zones.map((r) => [r.tz, +r.z]));
     const now = new Date();
     for (const [tz, want] of [['Asia/Kolkata', 6], ['America/St_Johns', 21], ['Pacific/Marquesas', 15], ['Asia/Kathmandu', 6]]) {
@@ -993,6 +1013,106 @@ async function main() {
       !many.error && many.data.length === 20 && many.data[0].place === C_POS.city && many.data[1].place === 'x6' &&
       many.data[19].place === 'x24' && after.n === '0',
       `${msg(many)} ${JSON.stringify(after)}`);
+  }
+
+  // ── city places: key 'g' || geonameid, real zone in zone_tz, 0.21 degree box ──
+  {
+    sql(`delete from public.rate_events where uid = '${uidD}' and kind in ('lantern', 'wave', 'check_in', 'echo_wave');`);
+    const ci = (c, pos, over = {}) => c.rpc('check_in', { p_lat: pos.lat, p_lon: pos.lon, p_place: FORGED, p_tz: pos.tz, p_zone: 0, ...over });
+    const echoOf = (uid) => sqlRows(`select place || '|' || tz || '|' || zone as e from public.echoes where uid = '${uid}'`)[0]?.e;
+
+    // A half-hour zone, with a forged p_zone: the ring zone comes from the city's real time zone.
+    const p1 = await ci(D, PUNE);
+    check('check_in with a city key in a half-hour zone stores the city, the key and the zone of its real time zone',
+      !p1.error && PUNE.zone === 'Asia/Kolkata' && echoOf(uidD) === `Pune|${PUNE.tz}|6`, `${msg(p1)} ${echoOf(uidD)}`);
+
+    const bad = [
+      ['an unknown city key (g1)', await ci(D, MADISON, { p_tz: 'g1' })],
+      ['a city key in the wrong case', await ci(D, MADISON, { p_tz: MADISON.tz.toUpperCase() })],
+      ['a geonameid without the g', await ci(D, MADISON, { p_tz: MADISON.tz.slice(1) })],
+      ['a latitude 0.3 degrees from the city', await ci(D, MADISON, { p_lat: MADISON.lat + 0.3 })],
+      ['a longitude 0.3 degrees from the city', await ci(D, MADISON, { p_lon: MADISON.lon - 0.3 })],
+      ['a city key at the centre of its zone place', await ci(D, { ...PLACES.get(MADISON.zone), tz: MADISON.tz })],
+      ['a zone key at a city of that zone', await ci(D, { ...MADISON, tz: MADISON.zone })],
+    ];
+    for (const [name, r] of bad) check(`check_in rejects ${name}`, r.error?.message === 'invalid_input', msg(r));
+    const nb = PLACES.get('Africa/Nairobi');
+    const wide = await ci(D, { ...nb, lat: nb.lat + 0.5, lon: nb.lon - 0.5 });
+    check('check_in: 0.5 degrees from the centre is still accepted for a zone key', !wide.error && !!echoOf(uidD)?.startsWith('Nairobi|Africa/Nairobi|'), `${msg(wide)} ${echoOf(uidD)}`);
+    const edge = await ci(D, { ...MADISON, lat: MADISON.lat + 0.2, lon: MADISON.lon - 0.2 });
+    check('check_in: 0.2 degrees from the centre is accepted for a city key', !edge.error, msg(edge));
+
+    const zM = jsZone(MADISON.zone);
+    const m1 = await ci(D, MADISON, { p_zone: (zM + 7) % 24 });
+    const [lit] = sqlRows(`select count(*) as n from public.zone_days where day = public._utc_day() and zone = ${zM}`);
+    check('check_in with a city key at the city coordinates works and lights the zone of its real time zone',
+      !m1.error && echoOf(uidD) === `Madison|${MADISON.tz}|${zM}` && lit.n === '1', `${msg(m1)} ${echoOf(uidD)} ${JSON.stringify(lit)}`);
+    const seenEcho = await A.rpc('recent_echoes');
+    check('recent_echoes shows a city visitor by the city name',
+      !seenEcho.error && seenEcho.data.some((x) => x.place === 'Madison' && near(x.lat, MADISON.lat, 0.001) && near(x.lon, MADISON.lon, 0.001)), msg(seenEcho));
+
+    // Lantern: the name is the city, tz is the real IANA zone (clients format local time with it).
+    const lr = await D.rpc('release_lantern', lanternArgs(PUNE, '[test] from a city'));
+    const lc = lr.data;
+    check('release_lantern with a city key returns place = the city name and tz = the real IANA zone',
+      !lr.error && lc?.place === 'Pune' && lc?.tz === 'Asia/Kolkata', msg(lr));
+    check('a city lantern sits within 0.2 degrees of the city centre',
+      !!lc && near(lc.lat, PUNE.lat, 0.2011) && near(lc.lon, PUNE.lon, 0.2011), JSON.stringify(lc));
+    const lrow = await A.from('lanterns').select('place, tz').eq('id', lc?.id ?? ZERO_ID);
+    check('the city lantern row read over REST carries the real zone, not the key',
+      !lrow.error && lrow.data.length === 1 && lrow.data[0].place === 'Pune' && lrow.data[0].tz === 'Asia/Kolkata', msg(lrow));
+    const lbad = await D.rpc('release_lantern', { ...lanternArgs(PUNE, '[test] unknown key'), p_tz: 'g1' });
+    const lfar = await D.rpc('release_lantern', { ...lanternArgs(PUNE, '[test] too far'), p_lat: PUNE.lat - 0.3 });
+    check('release_lantern rejects an unknown city key and a position 0.3 degrees from the city',
+      lbad.error?.message === 'invalid_input' && lfar.error?.message === 'invalid_input', `${msg(lbad)} | ${msg(lfar)}`);
+
+    // Thread between a city-key visitor (D, old four-argument call: the key comes from its last
+    // check_in) and a zone-key visitor (B).
+    const wave = (c, to, pos, extra = {}) => c.rpc('send_wave', { p_to: to, p_lat: pos.lat, p_lon: pos.lon, p_place: FORGED, ...extra });
+    const wbad = await wave(D, uidB, MADISON, { p_tz: 'g1' });
+    const wfar = await wave(D, uidB, { lat: MADISON.lat, lon: MADISON.lon + 0.3 }, { p_tz: MADISON.tz });
+    check('send_wave rejects an unknown city key and a position 0.3 degrees from the city',
+      wbad.error?.message === 'invalid_input' && wfar.error?.message === 'invalid_input', `${msg(wbad)} | ${msg(wfar)}`);
+    const db = await wave(D, uidB, MADISON);
+    const bd = await wave(B, uidD, B_POS, { p_tz: B_POS.tz });
+    const tc = bd.data?.thread;
+    const wantKm = km(MADISON.lat, MADISON.lon, B_POS.lat, B_POS.lon);
+    check('send_wave between a city-key visitor and a zone-key visitor makes a thread with the right place names',
+      !db.error && db.data?.thread === null && !bd.error && !!tc?.id && tc.a_place === 'Madison' && tc.b_place === B_POS.city &&
+      near(tc.a_lat, MADISON.lat, 0.001) && near(tc.a_lon, MADISON.lon, 0.001), `${msg(db)} | ${msg(bd)}`);
+    check(`city thread km is plausible (got ${tc?.km}, expected about ${wantKm.toFixed(0)})`, !!tc && Math.abs(tc.km - wantKm) < wantKm * 0.005);
+    // And the other way round, city key sent explicitly: C (zone key) first, then D.
+    const cd = await wave(C, uidD, C_POS, { p_tz: C_POS.tz });
+    const dc = await wave(D, uidC, MADISON, { p_tz: MADISON.tz });
+    const tc2 = dc.data?.thread;
+    check('send_wave with an explicit city key completes a thread started by a zone-key visitor',
+      !cd.error && !dc.error && !!tc2?.id && tc2.a_place === C_POS.city && tc2.b_place === 'Madison', `${msg(cd)} | ${msg(dc)}`);
+
+    // Echo wave from a city-key visitor: the recipient gets the city name and the real zone.
+    const eidA = sqlRows(`select eid from public.echoes where uid = '${uidA}'`)[0]?.eid;
+    const ebad = await D.rpc('wave_echo', { p_eid: eidA, p_lat: MADISON.lat, p_lon: MADISON.lon, p_tz: 'g1' });
+    const efar = await D.rpc('wave_echo', { p_eid: eidA, p_lat: MADISON.lat + 0.3, p_lon: MADISON.lon, p_tz: MADISON.tz });
+    check('wave_echo rejects an unknown city key and a position 0.3 degrees from the city',
+      ebad.error?.message === 'invalid_input' && efar.error?.message === 'invalid_input', `${msg(ebad)} | ${msg(efar)}`);
+    const eok = await D.rpc('wave_echo', { p_eid: eidA, p_lat: MADISON.lat, p_lon: MADISON.lon, p_tz: MADISON.tz });
+    const [stored] = sqlRows(`select from_place || '|' || from_tz as v from public.echo_waves where to_uid = '${uidA}' and from_uid = '${uidD}'`);
+    const got = await A.rpc('collect_echo_waves');
+    const w = got.data?.[0];
+    check('wave_echo + collect_echo_waves from a city-key visitor returns the city name and the real zone',
+      !eok.error && eok.data?.ok === true && stored?.v === 'Madison|America/Chicago' && !got.error && got.data.length === 1 &&
+      w.place === 'Madison' && w.tz === 'America/Chicago' && near(w.lat, MADISON.lat, 0.001) && near(w.lon, MADISON.lon, 0.001),
+      `${msg(eok)} ${JSON.stringify(stored)} ${msg(got)}`);
+
+    const [keys] = sqlRows(`
+      select (select count(*) from public.lanterns where tz ~ '^g[0-9]+$') as lantern_keys,
+             (select count(*) from public.echo_waves where from_tz ~ '^g[0-9]+$') as echo_wave_keys,
+             (select tz from public.echoes where uid = '${uidD}') as echo_key`);
+    check('no place key is stored where clients read a time zone; echoes.tz keeps the key',
+      keys.lantern_keys === '0' && keys.echo_wave_keys === '0' && keys.echo_key === MADISON.tz, JSON.stringify(keys));
+
+    const pr = await D.from('places').select('tz, zone_tz, jitter').eq('tz', MADISON.tz);
+    const pa = await anon.from('places').select('tz, city, zone_tz').limit(1);
+    check('places (city rows, new columns) is not readable via REST, signed in or not', !!pr.error && !!pa.error, `${msg(pr)} | ${msg(pa)}`);
   }
 
   await A.removeAllChannels();

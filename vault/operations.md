@@ -44,6 +44,12 @@ node scripts/reset-world.mjs --yes   # wipes ALL visitor data (keeps the 6 seede
 
 Playwright needs its browser once: `npx playwright install chromium`.
 
+## Regenerating place data
+
+- Zone places: `python -X utf8 scripts/gen-tz.py` → `src/lib/tzdata.ts`.
+- Cities: download `cities15000.zip` from https://download.geonames.org/export/dump/ and run `python -X utf8 scripts/gen-cities.py <path>/cities15000.txt` → `src/lib/cities.ts`.
+- Either one changing means the database `places` table must be regenerated in a new migration, or the server will reject the new keys.
+
 ## Deploy
 
 - Front end: push to `main` → `.github/workflows/deploy.yml` runs unit tests, builds, publishes to GitHub Pages. Watch with `gh run watch`.

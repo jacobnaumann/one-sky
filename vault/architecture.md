@@ -37,7 +37,8 @@ Supabase project evktxfawnualbbmoujip (us-east-1)
 | `src/net/sky.ts` | `Sky` class: connect, presence validation, broadcasts, RPC wrappers |
 | `src/net/config.ts` | Supabase URL + public anon key |
 | `src/audio/engine.ts` | `AudioEngine`: bed, twinkles, event sounds; D major pentatonic |
-| `src/lib/tz.ts`, `tzdata.ts` | 418 places (IANA zone → city, country, lat/lon); `placeForTimeZone`, `placeByTz`, `jitter` |
+| `src/lib/tz.ts`, `tzdata.ts` | 418 zone places (IANA zone → city, country, lat/lon); `placeForTimeZone`, `jitter` |
+| `src/lib/places.ts`, `cities.ts` | every place a light can sit: zone places (key = zone name) + 11,585 GeoNames cities of 50k+ (key = `g<geonameid>`); `placeByKey`, `searchAll`, `nearestPlace`, `scatter` |
 | `src/lib/sun.ts` | subsolar point, sun direction, solar elevation, sky state |
 | `src/lib/geo.ts` | lat/lon ↔ vec3 (matches Three sphere UVs), great-circle distance and arcs |
 | `src/lib/questions.ts` | 70 daily questions, chosen by UTC day |
@@ -53,7 +54,7 @@ Supabase project evktxfawnualbbmoujip (us-east-1)
 ## How the main flows work
 
 - **Arrival:** `boot()` builds the globe and connects as a *watcher* (subscribed, not tracked). "Step into the sky" → `enter()` starts audio, flies the camera to the visitor's place, then `sky.appear(me)` tracks presence and calls `check_in` (which lights the visitor's zone for the UTC day).
-- **Place:** `Intl…timeZone` → `placeForTimeZone` → city centre + deterministic per-browser jitter (≤0.6°). Stored override in `localStorage['onesky.tz']`.
+- **Place:** default `Intl…timeZone` → `placeForTimeZone` → zone city + per-browser scatter (≤0.6°). "Move my light" lets the visitor search all places or press "Use my location" (nearest city, scatter ≤0.12°). The chosen place key is kept in `localStorage['onesky.place']` and sent to the server in the `p_tz` argument of every location RPC (the name is historical: it is a place key). The database `places` table holds the same keys with each place's real zone (`zone_tz`) and allowed scatter (`jitter`).
 - **Wave:** broadcast `{from,to}` (ids only) + RPC `send_wave`. Receivers resolve both ends from presence. A reverse wave within 10 minutes makes the RPC insert a `threads` row; everyone learns of it from postgres_changes. A client decides a thread is "mine" by asking `my_marks()`.
 - **Lantern:** RPC `release_lantern` → row → postgres_changes INSERT to everyone. Warmth via `warm_lantern` (UPDATE event). Three reports hide it; `lantern_hidden` broadcast is a hint the client confirms by re-selecting.
 - **Ring:** `zone_days(day, zone)`; first check-in from a zone inserts the row; clients render 24 segments.
@@ -63,7 +64,7 @@ Supabase project evktxfawnualbbmoujip (us-east-1)
 ## Invariants — do not break
 
 1. **No fake people.** Live lights are real presences. Echoes and seeded lanterns are labelled.
-2. **No precise location.** Position = time-zone city + small jitter, or a city the visitor chose. No IP lookup, no GPS.
+2. **No precise location.** Position = a city + small fixed scatter: the time-zone city by default, a city the visitor chose, or (opt-in, `navigator.geolocation` behind a button) the nearest city. The browser's coordinates are used once in `openMove()` to call `nearestPlace()` and are never stored, logged or sent. No IP lookup.
 3. **No direct table writes from the client.** All writes go through rate-limited functions.
 4. **Never `select *`** on `lanterns` or `threads`: uid columns are not granted; list columns (`LANTERN_COLS`, `THREAD_COLS` in `sky.ts`).
 5. **Never trust realtime payload content.** Presence and broadcasts can be sent by anyone with the public key. Read only ids from them; names and positions come from our own tz table (presence) or the database. Remote text reaches the DOM only as text nodes (`h()` children, `rich()`, `textContent`) — never `innerHTML`.
@@ -97,4 +98,5 @@ From two security reviews. None leaks data or lets anyone put free text in front
 - 2026-11-13 — After a security review: stopped trusting broadcast/presence content (see invariant 5); removed the `thread` broadcast entirely; server validates places against a `places` table and computes zones itself.
 - 2026-11-13 — Anonymous sign-in rate limit raised 30 → 150 per hour per IP so a room of people on one network can all join. Consider lowering after the demo.
 - 2026-11-13 — Commits use the GitHub no-reply address so the owner's personal email is not published in a public repo.
+- 2026-11-13 — Owner asked for more precise placement than the time-zone city. Chosen: opt-in nearest city (browser geolocation behind a button, snapped on the device to one of 11,585 cities) plus search over all of them. Rejected: automatic IP lookup (sends every visitor's IP to a third party).
 - 2026-11-13 — Adaptive quality: if average frame time exceeds ~37 ms the globe lowers resolution, then drops bloom. `?hq` pins full quality (used by screenshot scripts); `?low` forces the low tier.

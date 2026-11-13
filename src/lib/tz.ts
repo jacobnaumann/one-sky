@@ -9,6 +9,10 @@ import { ALIASES, COUNTRIES, RAW_PLACES } from './tzdata';
 import { isValidTimeZone, utcOffsetMinutes } from './time';
 
 export interface Place {
+  /** Place key for cities beyond the time-zone table ("g" + GeoNames id). Absent for zone places, whose key is `tz`. */
+  key?: string;
+  /** State or province code, where city names repeat a lot (US, Canada, Australia). */
+  region?: string;
   tz: string;
   lat: number;
   lon: number;

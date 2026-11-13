@@ -6,7 +6,8 @@ import './styles.css';
 import { Globe, type LightDot, type Pick } from './globe/globe';
 import { Sky, type Person, type Lantern, type Thread, type Echo, type ZoneDay, type Stats, type Me } from './net/sky';
 import { AudioEngine } from './audio/engine';
-import { placeForTimeZone, placeForOffset, searchPlaces, jitter, PLACES, type Place } from './lib/tz';
+import { placeForTimeZone, placeForOffset, PLACES, type Place } from './lib/tz';
+import { placeByKey, placeKey, scatter, searchAll, nearestPlace, cityLabel, fullLabel, placeByCityName, allCities, isCity } from './lib/places';
 import { localTimeString, zoneIndex, zoneLabel, utcDay, relativeTime, utcOffsetMinutes } from './lib/time';
 import { skyState, solarElevation } from './lib/sun';
 import { greatCircleKm, formatKm, latLonToVec3, vec3ToLatLon } from './lib/geo';
@@ -28,12 +29,13 @@ let seed = store.get('onesky.seed');
 if (!seed) { seed = Math.random().toString(36).slice(2) + Date.now().toString(36); store.set('onesky.seed', seed); }
 
 function buildMe(place: Place): Me & { place: Place } {
-  const j = jitter(place, seed!);
-  return { place, lat: +j.lat.toFixed(3), lon: +j.lon.toFixed(3), city: place.city, country: place.country, tz: place.tz, zone: zoneIndex(place.tz) };
+  const j = scatter(place, seed!);
+  return { place, key: placeKey(place), lat: +j.lat.toFixed(3), lon: +j.lon.toFixed(3), city: cityLabel(place), country: place.country, tz: place.tz, zone: zoneIndex(place.tz) };
 }
 let browserTz: string | undefined;
 try { browserTz = Intl.DateTimeFormat().resolvedOptions().timeZone; } catch { /* keep undefined */ }
-let me = buildMe(placeForTimeZone(store.get('onesky.tz') ?? browserTz));
+// where the visitor last put their light, else the city of their device's time zone
+let me = buildMe(placeByKey(store.get('onesky.place')) ?? placeForTimeZone(store.get('onesky.tz') ?? browserTz));
 
 const sky = new Sky();
 const audio = new AudioEngine();
@@ -189,7 +191,7 @@ function mySunLine(): string {
 }
 
 function renderYou() {
-  $('you-place').textContent = placeLine(me.city, me.country);
+  $('you-place').textContent = fullLabel(me.place);
   const sun = mySunLine();
   $('you-time').textContent = skyLine(me.lat, me.lon, me.tz) + (sun ? ` · ${sun}` : '');
 }
@@ -296,13 +298,10 @@ let spot: { lat: number; lon: number; until: number } | null = null;
 function showSpot(x: number, y: number) {
   const hit = globe.hit(x, y);
   if (!hit) { spot = null; return; }
-  let best: Place | null = null, bd = 1e9;
-  for (const p of PLACES) {
-    const d = greatCircleKm(hit.lat, hit.lon, p.lat, p.lon);
-    if (d < bd) { bd = d; best = p; }
-  }
-  if (!best || bd > 2600) { spot = null; return; }
-  spotLabel.replaceChildren(h('b', {}, best.city), ` ${localTimeString(best.tz)} · ${skyState(best.lat, best.lon, new Date())}`);
+  const best = nearestPlace(hit.lat, hit.lon);
+  const bd = greatCircleKm(hit.lat, hit.lon, best.lat, best.lon);
+  if (bd > 2600) { spot = null; return; }
+  spotLabel.replaceChildren(h('b', {}, cityLabel(best)), ` ${localTimeString(best.tz)} · ${skyState(best.lat, best.lon, new Date())}`);
   spot = { lat: best.lat, lon: best.lon, until: performance.now() + 5200 };
   audio.uiTick();
 }
@@ -452,7 +451,7 @@ function renderEchoCard(id: string) {
     h('p', { class: 'eyebrow' }, 'An echo'),
     h('h2', {}, e.place),
     h('p', { class: 'sub' }, `Someone was here ${relativeTime(e.last_seen)}.`),
-    facts([['their time', (() => { const pl = PLACES.find((x) => x.city === e.place); return pl ? localTimeString(pl.tz) : '—'; })()], ['from you', formatKm(greatCircleKm(me.lat, me.lon, e.lat, e.lon))]]),
+    facts([['their time', (() => { const pl = placeByCityName(e.place); return pl ? localTimeString(pl.tz) : '—'; })()], ['from you', formatKm(greatCircleKm(me.lat, me.lon, e.lat, e.lon))]]),
     actions,
     note,
   );
@@ -761,29 +760,47 @@ function openComposer() {
 function openMove() {
   stopDrift();
   modal((close) => {
-    const input = h('input', { type: 'search', placeholder: 'Search a city or country', 'aria-label': 'Search places', autocomplete: 'off', 'data-autofocus': true });
+    const input = h('input', { type: 'search', placeholder: 'Search for your city', 'aria-label': 'Search cities', autocomplete: 'off' });
     const list = h('div', { class: 'places', role: 'listbox' });
-    const choose = (p: Place) => {
-      store.set('onesky.tz', p.tz);
+    const status = h('p', { class: 'fine', role: 'status', style: 'margin:10px 0 0;min-height:18px' });
+    const choose = (p: Place, how = 'moved to') => {
+      store.set('onesky.place', placeKey(p));
       me = buildMe(p);
       sunCache = null;
       renderYou(); refreshLights(); renderRing(false);
       void sky.move(me);
-      void globe.flyTo(me.lat, me.lon, undefined, 1600);
+      void globe.flyTo(me.lat + (me.lat >= 0 ? 9 : -9), me.lon, undefined, 1600);
       close();
-      feed(rich(['Your light moved to ', { b: p.city }]));
+      feed(rich([`Your light ${how} `, { b: cityLabel(p) }]));
     };
+    const locate = h('button', { class: 'btn primary', 'data-autofocus': true }, 'Use my location');
+    locate.addEventListener('click', () => {
+      if (!navigator.geolocation) { status.textContent = 'This browser can’t share a location. Search for your city instead.'; return; }
+      locate.setAttribute('disabled', ''); locate.textContent = 'Asking your browser…';
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          // The exact position is used once, here, to pick the nearest city. It is never stored or sent.
+          const p = nearestPlace(pos.coords.latitude, pos.coords.longitude);
+          choose(p, 'is now in');
+        },
+        (err) => {
+          locate.removeAttribute('disabled'); locate.textContent = 'Use my location';
+          status.textContent = err.code === 1 ? 'Your browser didn’t share a location, which is fine. Search for your city instead.' : 'Your browser couldn’t work out where you are. Search for your city instead.';
+        },
+        { enableHighAccuracy: false, maximumAge: 3600000, timeout: 12000 },
+      );
+    });
     const paint = () => {
       const q = input.value.trim();
       const home = placeForTimeZone(browserTz);
-      const res = q ? searchPlaces(q, 8) : [home, ...['Asia/Tokyo', 'Africa/Nairobi', 'America/Sao_Paulo', 'Europe/Paris', 'Australia/Sydney', 'America/Chicago'].map((t) => placeForTimeZone(t)).filter((x) => x.tz !== home.tz).slice(0, 5)];
+      const res = q ? searchAll(q, 8) : [home];
       list.classList.toggle('has-query', !!q);
       list.replaceChildren(...res.map((p, i) => {
-        const b = h('button', { role: 'option' }, h('span', {}, p.city), h('small', {}, !q && i === 0 ? 'where your clock says you are' : p.country));
+        const b = h('button', { role: 'option' }, h('span', {}, cityLabel(p)), h('small', {}, !q && i === 0 ? 'where your clock says you are' : p.country));
         b.addEventListener('click', () => choose(p));
         return b;
       }));
-      if (!res.length) list.append(h('p', { class: 'fine', style: 'padding:12px' }, 'No place by that name among the world’s time zones.'));
+      if (!res.length) list.append(h('p', { class: 'fine', style: 'padding:12px' }, 'No city by that name here. Try a larger one nearby.'));
     };
     input.addEventListener('input', paint);
     input.addEventListener('keydown', (e) => { if (e.key === 'Enter') (list.querySelector('button') as HTMLElement | null)?.click(); });
@@ -791,7 +808,12 @@ function openMove() {
     return h('div', {},
       h('p', { class: 'eyebrow' }, 'Move my light'),
       h('h2', {}, 'Where on Earth are you?'),
-      h('p', {}, `One Sky placed you from your clock, near ${me.city}. It never asks for your real location. Not right? Pick from ${PLACES.length} places.`),
+      h('p', {}, isCity(me.place)
+        ? `Your light is in ${fullLabel(me.place)}. Move it whenever you like.`
+        : `One Sky guessed ${cityLabel(me.place)} from your device’s clock, without asking where you are. You can put your light in your own city.`),
+      h('div', { class: 'locate' }, locate, h('p', { class: 'fine' }, 'Your browser will ask first. One Sky keeps only the nearest city; your exact position never leaves this device.')),
+      status,
+      h('p', { class: 'eyebrow', style: 'margin:18px 0 8px' }, `Or choose from ${(allCities().length + PLACES.length).toLocaleString('en-US')} places`),
       input, list,
     );
   }, { label: 'Move my light' });
@@ -812,8 +834,8 @@ function openAbout() {
       h('div', {}, h('i', { class: 'e' }), h('p', {}, h('strong', {}, 'The ring'), ' has 24 parts, one per time zone. Each lights when someone from there arrives. It resets at midnight UTC.')),
       h('div', {}, h('i', { class: 'b' }), h('p', {}, h('strong', {}, 'An echo'), ' is someone who was here in the last two days and has gone. Leave them a wave; they get it when they come back. ', h('strong', {}, 'A soft ring'), ' on the ground is where someone else is looking right now.')),
     ),
-    h('p', {}, h('strong', {}, 'Privacy.'), ' No account, no name, no tracking. Your light sits near the main city of your time zone — taken from your device’s clock, not your location — and you can move it. Lanterns are public and anonymous.'),
-    h('p', { class: 'fine' }, 'Nobody on this globe is simulated. Earth imagery: NASA Blue Marble and Black Marble. Drag to turn, scroll or pinch to zoom.'),
+    h('p', {}, h('strong', {}, 'Privacy.'), ' No account, no name, no tracking. Your light starts at the main city of your time zone, read from your device’s clock. You can move it to your own city by search, or let your browser find the nearest city for you: your exact position is used once on your device and never stored or sent. Lanterns are public and anonymous.'),
+    h('p', { class: 'fine' }, 'Nobody on this globe is simulated. Earth imagery: NASA Blue Marble and Black Marble. City data: GeoNames. Drag to turn, scroll or pinch to zoom.'),
     h('p', { class: 'fine keys-note' }, 'Keyboard: arrows turn, + and − zoom, [ and ] step through lights and lanterns, Enter acts, R sends a ripple, D watches a day pass.'),
   ), { label: 'About One Sky' });
 }
@@ -1194,6 +1216,7 @@ function boot() {
   fitMobile(); addEventListener('resize', fitMobile);
 
   $('arrival-place').textContent = me.city;
+  if (!isCity(me.place) && !store.get('onesky.place')) $('arrival-fine').append(' You can move it to your own city once you’re in.');
   $('ask-q').textContent = question.text;
   buildRingStrip(); renderYou(); renderCensus(); updateArrivalCount();
 

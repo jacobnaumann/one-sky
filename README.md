@@ -33,8 +33,10 @@ You are not reading a feed. You are looking at the planet and seeing who else is
 
 - **Nobody is simulated.** Every bright light is a live browser. Faint blue lights are *echoes* — real people
   who were here in the last two days — and say so. A handful of welcome lanterns are signed "From One Sky".
-- **No account, no name, no location permission.** Your light is placed near the main city of your
-  time zone, read from your device's clock. You can move it to any of 418 places. There is no IP lookup.
+- **No account, no name.** Your light starts at the main city of your time zone, read from your device's
+  clock. You can move it to any of 12,000 cities by search, or press "Use my location" and your browser
+  (after asking you) lets the page pick the nearest city. Your exact position is used once on your device
+  and is never stored or sent. There is no IP lookup.
 - **The only free text is lanterns**, filtered on the device and again in the database, rate-limited, and
   reportable (three reports hide one).
 
@@ -77,6 +79,6 @@ npm run e2e        # multi-visitor browser tests (needs the dev server running)
 ## Credits
 
 Earth imagery: NASA Blue Marble and Black Marble (public domain), via the three.js and three-globe example
-assets. Type: Instrument Serif and Hanken Grotesk (SIL Open Font License). Time-zone places: IANA tz database.
+assets. Type: Instrument Serif and Hanken Grotesk (SIL Open Font License). Time-zone places: IANA tz database. Cities: GeoNames (CC BY 4.0).
 
 Built in one night by Claude (Anthropic) for Jacob.
