@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>One Sky — everyone here right now is a light on the Earth</title>
+<meta name="description" content="A live Earth, lit by the real sun, where every person on the page is a light where they are. Wave across the planet. Release a lantern. Help light all 24 time zones today.">
+<meta property="og:title" content="One Sky">
+<meta property="og:description" content="Everyone here right now is a light on the Earth. Come be one.">
+<meta property="og:type" content="website">
+<meta property="og:image" content="./og.jpg">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="./favicon.svg" type="image/svg+xml">
+</head>
+<body>
+<canvas id="sky" aria-label="The Earth, lit by the sun as it is right now. Each light is a person on this page." role="img"></canvas>
+<div id="labels" aria-hidden="true"></div>
+
+<div id="app" class="app is-hidden">
+  <header class="top">
+    <div class="brand">
+      <h1>One Sky</h1>
+      <p id="census" aria-live="polite">&nbsp;</p>
+    </div>
+    <nav class="tools" aria-label="Tools">
+      <button class="icon-btn" id="btn-sound" aria-pressed="true" title="Sound">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path class="on" d="M4 9.5v5h3.2L12 18.5v-13L7.2 9.5H4Zm11.2-1.3a5 5 0 0 1 0 7.6M17.6 5.6a8.6 8.6 0 0 1 0 12.8"/><path class="off" d="M4 9.5v5h3.2L12 18.5v-13L7.2 9.5H4Zm11.5.2 4.6 4.6m0-4.6-4.6 4.6"/></svg>
+        <span class="sr">Sound</span>
+      </button>
+      <button class="icon-btn" id="btn-postcard" title="Save a postcard of this view">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 8.2h3l1.4-2.2h6.2l1.4 2.2h3v10.3h-15V8.2Z"/><circle cx="12" cy="13.2" r="3.2"/></svg>
+        <span class="sr">Postcard</span>
+      </button>
+      <button class="icon-btn" id="btn-about" title="About One Sky">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.2"/><path d="M12 11v5.2M12 7.9v.2"/></svg>
+        <span class="sr">About</span>
+      </button>
+    </nav>
+  </header>
+
+  <ol id="feed" class="feed" aria-live="polite" aria-label="What is happening"></ol>
+
+  <section class="you" aria-label="Your light">
+    <p class="eyebrow">Your light</p>
+    <p class="you-place"><span id="you-place">—</span></p>
+    <p class="you-meta"><span id="you-time">—</span></p>
+    <button class="link" id="btn-move">Move my light</button>
+  </section>
+
+  <section class="ask" aria-label="Today's question">
+    <p class="eyebrow">Today, the whole world is asked</p>
+    <p class="ask-q" id="ask-q">&nbsp;</p>
+    <button class="btn primary" id="btn-lantern"><span class="lantern-ico" aria-hidden="true"></span><span id="btn-lantern-label">Release a lantern</span></button>
+  </section>
+
+  <section class="world" aria-label="The world today">
+    <div class="ringbox">
+      <p class="eyebrow"><span id="ring-count">0</span> of 24 time zones lit today</p>
+      <div class="ringstrip" id="ringstrip" role="img" aria-label="Time zones lit today"></div>
+      <p class="ring-hint" id="ring-hint">&nbsp;</p>
+    </div>
+    <dl class="stats">
+      <div><dt>threads</dt><dd id="st-threads">0</dd></div>
+      <div><dt>km connected</dt><dd id="st-km">0</dd></div>
+      <div><dt>lanterns aloft</dt><dd id="st-lanterns">0</dd></div>
+    </dl>
+  </section>
+
+  <aside id="card" class="card" hidden aria-live="polite"></aside>
+  <div id="tip" class="tip" hidden></div>
+  <div id="toasts" class="toasts" aria-live="assertive"></div>
+  <p id="offline" class="offline" hidden>The sky is out of reach right now — you can still look. Reconnecting…</p>
+</div>
+
+<div id="arrival" class="arrival">
+  <div class="arrival-inner">
+    <p class="eyebrow arrival-eyebrow" id="arrival-eyebrow">&nbsp;</p>
+    <h1 class="arrival-title">One Sky</h1>
+    <p class="arrival-line">Everyone here right now is a light on the Earth.<br>You are about to become one.</p>
+    <button class="btn primary big" id="btn-enter" disabled>Step into the sky</button>
+    <p class="arrival-fine" id="arrival-fine">No account. No name. Your light appears near <span id="arrival-place">your part of the world</span>, never at your address.</p>
+  </div>
+</div>
+
+<div id="modal-root"></div>
+<noscript><p style="color:#eee;font:16px system-ui;padding:2rem">One Sky needs JavaScript and WebGL to draw the Earth.</p></noscript>
+<script type="module" src="/src/main.ts"></script>
+</body>
+</html>

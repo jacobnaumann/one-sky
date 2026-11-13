@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.secrets/
+.env
+.env.*
+*.local
+test-results/
+playwright-report/
+supabase/.temp/
+supabase/.branches/
+.DS_Store
+scripts/.tzcache/
