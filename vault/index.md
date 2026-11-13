@@ -11,11 +11,12 @@ and together try to light all 24 time zones in a day.
 
 ## Current state
 
-- 2026-11-13 17:15 UTC — **Live and finished for hand-off** at https://jacobnaumann.github.io/one-sky/ (repo `jacobnaumann/one-sky`, Supabase `evktxfawnualbbmoujip`).
+- 2026-11-13 17:50 UTC — **Live** at https://jacobnaumann.github.io/one-sky/ (repo `jacobnaumann/one-sky`, Supabase `evktxfawnualbbmoujip`).
 - Features: live Earth with real sun; presence, gaze, waves, threads, ripples; lanterns (release, warm, report, translate); 24-zone ring; echoes and echo waves; Drift; watch a day pass; postcard; move my light; generative sound.
 - Reviewed and acted on: two security reviews, two bug/regression hunts, a design critique, two first-time-visitor passes, measured audio levels.
-- Tests: unit 127; live database 192; multi-visitor browser tests 4, passing on production in Chromium, Firefox and WebKit.
-- Live database holds only the 6 welcome lanterns (test data reset).
+- Placement: time-zone city by default; search over 12,003 places; opt-in "Use my location" snaps to the nearest city on the device.
+- Tests: unit 133; live database 218; multi-visitor browser tests 5, passing on production in Chromium, Firefox and WebKit.
+- Live database: the 6 welcome lanterns plus real visitors' data. **Do not run `reset-world` blindly any more** (see [[operations]]).
 
 ## Open items
 
@@ -24,7 +25,8 @@ and together try to light all 24 time zones in a day.
 - [ ] After the demo: put `anonymous_users` back to 30 in `supabase/config.toml` and push; consider Turnstile captcha
 - [ ] Clean dead/overridden CSS in `src/styles.css` (list in the 17:15 log entry's regression report)
 - [ ] Larger fixes noted under Known limits in [[architecture]]: database-backed roster instead of trusting presence keys; `my_marks()` returning the other party's uid
-- [ ] `places` table must be regenerated in a migration if `scripts/gen-tz.py` regenerates `tzdata.ts`
+- [ ] `places` table must be regenerated in a migration if `gen-tz.py` or `gen-cities.py` output changes (`scripts/gen-places-sql.mjs`)
+- [ ] Try the "Use my location" permission prompt on a real phone
 - [ ] The Supabase free project pauses after about a week without use
 
 ## Map

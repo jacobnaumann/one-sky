@@ -42,6 +42,12 @@ The e2e and db tests write real rows to the live database (bodies prefixed `[tes
 node scripts/reset-world.mjs --yes   # wipes ALL visitor data (keeps the 6 seeded lanterns). Destructive: only before launch or after tests.
 ```
 
+Once real people use the site, do not wipe everything. Look first (`supabase db query --linked "select place, last_seen from echoes order by 2"`) and delete only the test visitors' rows: lanterns whose body starts with `[test]`, and echoes / zone_days / threads whose places are the test cities (Tokyo, Lisbon, São Paulo, Nairobi, Mexico City, Reykjavík, Madison, Kyoto), then recompute `world_totals` from `threads`.
+
+```bash
+# (nothing further)
+```
+
 Playwright needs its browser once: `npx playwright install chromium`.
 
 ## Regenerating place data
