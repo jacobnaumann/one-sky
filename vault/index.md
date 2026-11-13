@@ -11,19 +11,19 @@ and together try to light all 24 time zones in a day.
 
 ## Current state
 
-- 2026-11-13 07:40 UTC — **Live** at https://jacobnaumann.github.io/one-sky/ (repo `jacobnaumann/one-sky`, Supabase `evktxfawnualbbmoujip`).
+- 2026-11-13 08:05 UTC — **Live** at https://jacobnaumann.github.io/one-sky/ (repo `jacobnaumann/one-sky`, Supabase `evktxfawnualbbmoujip`).
 - Working and tested on production: presence, gaze, waves, threads, ripples, lanterns (release/warm/report/translate), 24-zone ring, echoes, drift, postcard, move-my-light, sound engine (levels measured, never listened to).
 - Backend hardened after a security review; visitor data reset to the 6 seeded lanterns.
-- In progress: design critique and client bug hunt by independent reviewers.
+- Also live: echo waves, watch-a-day-pass, drift captions. Reviews (security, bugs, design, audio levels) acted on.
 
 ## Open items
 
 - [x] Scaffold, globe, backend, presence/waves/threads, lanterns, ring, sound, arrival, postcard, mobile
 - [x] Deploy to GitHub Pages; multi-visitor tests on production
 - [x] Security review and fixes
-- [ ] Act on the design critique
-- [ ] Act on the client bug hunt
-- [ ] Act on the measured-audio report
+- [x] Act on the design critique
+- [x] Act on the client bug hunt
+- [x] Act on the measured-audio report
 - [ ] Final reset of test data, final deploy, hand-off summary
 - [ ] After the demo: consider lowering the anonymous sign-in limit back to 30/hour (`supabase/config.toml`)
 - [ ] Someone with speakers should listen to the sound once

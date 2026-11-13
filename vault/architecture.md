@@ -22,7 +22,7 @@ Supabase project evktxfawnualbbmoujip (us-east-1)
   ├─ Auth: anonymous sign-in only
   ├─ Realtime channel `sky` (public): Presence = who is here; Broadcast = gaze, wave, ripple, lantern_hidden
   │    + postgres_changes on lanterns, threads, zone_days
-  └─ Postgres: lanterns, warmths, reports, waves, threads, echoes, zone_days, rate_events, world_totals, places
+  └─ Postgres: lanterns, warmths, reports, waves, threads, echoes, echo_waves, zone_days, rate_events, world_totals, places, limits
        RLS on every table; writes only through rate-limited SECURITY DEFINER functions
 ```
 
@@ -57,6 +57,7 @@ Supabase project evktxfawnualbbmoujip (us-east-1)
 - **Wave:** broadcast `{from,to}` (ids only) + RPC `send_wave`. Receivers resolve both ends from presence. A reverse wave within 10 minutes makes the RPC insert a `threads` row; everyone learns of it from postgres_changes. A client decides a thread is "mine" by asking `my_marks()`.
 - **Lantern:** RPC `release_lantern` → row → postgres_changes INSERT to everyone. Warmth via `warm_lantern` (UPDATE event). Three reports hide it; `lantern_hidden` broadcast is a hint the client confirms by re-selecting.
 - **Ring:** `zone_days(day, zone)`; first check-in from a zone inserts the row; clients render 24 segments.
+- **Echo wave:** `recent_echoes()` returns an opaque `eid` per echo (never the uid). `wave_echo(eid, …)` stores one pending wave per sender per recipient; `collect_echo_waves()` returns and deletes the caller's pending waves on arrival.
 - **Ripple:** broadcast `{from}` only; the shader draws up to 6 concurrent rings from uniforms `uRipO/uRipT`.
 
 ## Invariants — do not break
