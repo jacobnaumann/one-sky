@@ -17,20 +17,35 @@
  *   voices ─┬─────────────────────────────► dry ─┐
  *           └─ per-voice send ─► HP 180 Hz ─► convolver ─► wet 0.55 ─┤
  *   bed (drone + air) ─► dry / send                                  ▼
- *                              master (mute / visibility fade) ─► compressor ─► trim 0.75 ─► out
+ *                              master (mute / visibility fade) ─► limiter ─► trim 0.62 ─► out
  *
- * LEVELS (linear amplitude, 1.0 = full scale; dBFS = 20*log10)
- *   bed      ~0.03 RMS  (≈ -31 dBFS)
- *   twinkle  ~0.035-0.06 peak (≈ -27 dBFS)
- *   events   0.09-0.24 peak   (≈ -21 .. -12 dBFS); waveIn is the loudest (≈ -12.5 dBFS)
- *   The compressor (threshold -6 dB) only acts when many things pile up. Browsers add
- *   ~+2.5 dB automatic make-up gain for these settings, which the 0.75 trim (-2.5 dB) undoes.
+ * LEVELS — measured, not estimated. `node scripts/audio-qa.mjs` runs this file in headless
+ * Chromium, records every sample sent to the destination and reports peak / RMS / DC /
+ * clicks / spectrum per scenario. Re-run it after changing any number in here.
+ * (dBFS; peak = louder channel, RMS = mean power of both channels, 100 ms windows.)
+ *   bed        -32.5 RMS steady (drifts about ±2 dB with its LFOs), peak ≈ -20
+ *   twinkle    -23 .. -28 peak (loudest 100 ms ≈ the bed's level: an ambient layer, not an event)
+ *   events     -18 .. -12 peak, loudest 100 ms 7-11 dB above the bed
+ *   waveIn     ≈ -10 peak, loudest 100 ms ≈ 15 dB above the bed: the most noticeable sound
+ *   uiTick     ≈ -31 peak (deliberately almost subliminal)
+ *   everything at once: ≤ -5.5 peak (the limiter's ceiling is ≈ -6)
+ * Things the arithmetic alone gets wrong (all measured):
+ *   - A mono voice through a centred StereoPanner is -3 dB in each channel.
+ *   - The reverb adds 1-3 dB to short bells, and its random impulse changes any one note's
+ *     level by about ±1 dB from page load to page load.
+ *   - DynamicsCompressorNode applies automatic make-up gain: +4.2 dB for the settings used
+ *     here (it was +1.8 dB for threshold -6 / knee 6 / ratio 6). MASTER_TRIM 0.62 (-4.2 dB)
+ *     undoes it exactly, so below the threshold the master chain is 0.0 dB. Change the
+ *     compressor settings and the trim must be re-measured (scenario "chain").
+ *   - Limiter curve: in ≤ -9 dBFS → unchanged; -6 → -7.3; 0 → -6.7; +8 → -6.1. No overshoot
+ *     on a hard step (the node looks ahead), THD < 0.02 %.
  *
  * ENVELOPES
- *   Every envelope is built from setTargetAtTime only (exponential approach), which is
- *   click-free, can never overshoot its target, and can be interrupted smoothly at any
- *   moment (needed for voice stealing). "attack" = time to reach 95 % of peak
- *   (time constant attack/3); "decay" = T60, time to fall 60 dB (time constant decay/6.908).
+ *   Decays and slow swells are setTargetAtTime (exponential approach): click-free, cannot
+ *   overshoot, and can be interrupted smoothly at any moment (voice stealing). Short attacks
+ *   are a linear ramp with an anchor — see envelope() for why that is not a matter of taste.
+ *   "attack" = time to peak (slow swells: to 95 %); "decay" = T60, time to fall 60 dB (time
+ *   constant decay/6.908).
  */
 
 export interface LightNote {
@@ -58,12 +73,12 @@ export function midiToHz(m: number): number {
 
 const MAX_VOICES = 24;
 const MIN_ATTACK = 0.006; // seconds; nothing ever starts faster than this
-const LEAD = 0.03; // schedule slightly ahead of currentTime to avoid late starts
+const LEAD = 0.03; // minimum scheduling lead over ctx.currentTime; see now()
 const T60 = 6.908; // ln(1000): time-constant → 60 dB decay time
 
-const MASTER_TRIM = 0.62;
+const MASTER_TRIM = 0.62; // undoes the compressor's automatic make-up gain (measured +4.2 dB)
 const WET_LEVEL = 0.55;
-const BED_LEVEL = 0.066;
+const BED_LEVEL = 0.066; // measured: bed ≈ -32.5 dBFS RMS at the output
 const BED_FADE_IN = 6;
 
 interface Partial {
@@ -136,7 +151,7 @@ const lonPan = (lon: number): number => (Number.isFinite(lon) ? clamp(lon / 180,
 
 /**
  * Gentle loudness compensation across the lon-mapped range: low sines are weak on laptop
- * speakers, high ones are piercing. D3 → ×1.25, A5 → ×0.70.
+ * speakers, high ones are piercing. D3 → ×1.25, A5 → ×0.80.
  */
 const eq = (midi: number): number => clamp(1.25 - ((midi - 50) / 31) * 0.45, 0.7, 1.25);
 
@@ -250,8 +265,8 @@ export class AudioEngine {
    * Your own light igniting. A chord of D rises from the bottom up, then one bell.
    *   D3 A3 D4 F#4 A4 E5 entering at 0, .25, .5, .8, 1.1, 1.45 s; each 1.4 s attack,
    *   0.3 s hold, 2.6 s decay → the whole swell is ~4-4.5 s.
-   *   Fundamental peaks .060 .050 .050 .042 .036 .022 (worst-case coherent sum ≈ 0.29,
-   *   typical ≈ 0.13 ≈ -18 dBFS). Bell: D5 at 1.9 s, peak .085 (×1.34 = 0.114 ≈ -19 dBFS).
+   *   Fundamental peaks .060 .050 .050 .042 .036 .022; bell: D5 at 1.9 s, peak .085.
+   *   Measured: peak ≈ -14.5 dBFS, audible for ≈ 4 s.
    */
   arrive(): void {
     const t = this.now();
@@ -276,7 +291,9 @@ export class AudioEngine {
 
   /**
    * Someone else appeared: one soft bell on their longitude's note, panned to them.
-   * Fundamental peak .07 × eq (.049-.088), ×1.34 with partials ≈ -24 .. -19 dBFS. 3 s decay.
+   * Fundamental peak .155 × eq, 3 s decay. Measured: peak -18 .. -14.5 dBFS (low notes are
+   * the louder ones on purpose). A burst of joins is turned down by crowd(): 60 in 2 s stays
+   * under the limiter.
    */
   lightJoined(lon: number): void {
     const t = this.now();
@@ -289,9 +306,10 @@ export class AudioEngine {
    * You waved. Note 1 (your longitude's note folded into D4..C#5) sounds now; a very quiet
    * sine glides upward while the arc travels, panning from you to them; note 2 (their
    * longitude's pitch class, placed 2-12 semitones above note 1) lands as the arc arrives.
-   *   note 1: peak .09 (×1.34 = .12 ≈ -18 dBFS), 1.6 s decay
-   *   glide : peak .022 (≈ -33 dBFS), swells over the travel time, 0.5 s release
-   *   note 2: peak .11 (×1.34 = .15 ≈ -16.5 dBFS), 2.8 s decay
+   *   note 1: peak .13, 1.6 s decay
+   *   glide : peak .03, swells over the travel time, 0.5 s release
+   *   note 2: peak .165, 2.8 s decay
+   * Measured: peak ≈ -15 dBFS.
    */
   waveOut(fromLon: number, toLon: number, travelSeconds: number): void {
     const t = this.now();
@@ -318,9 +336,11 @@ export class AudioEngine {
   /**
    * Someone waved at you — the signature sound. Always the same rising fourth onto the
    * tonic, A4 (440 Hz) → D5 (587.33 Hz), 0.19 s apart, with a warm D4 underneath note 2.
-   *   A4: peak .14 (×1.52 = .213 ≈ -13.4 dBFS), 2.2 s decay
-   *   D5: peak .155 (×1.52 = .236 ≈ -12.5 dBFS), 3.4 s decay
-   *   D4 underlay: peak .04, 2.4 s decay
+   *   A4: peak .23, 2.2 s decay
+   *   D5: peak .26, 3.4 s decay
+   *   D4 underlay: peak .065, 2.4 s decay
+   * Measured: peak ≈ -10 dBFS, 4-5 dB above every other event and just under the limiter's
+   * threshold; 10 ms attack, largest sample-to-sample step 0.04 (no click).
    * Panned only slightly toward the sender so it stays centred and clear.
    */
   waveIn(fromLon: number): void {
@@ -339,7 +359,8 @@ export class AudioEngine {
    *   < 13 000 km: D3 A3 E4 F#4 B4 E5          (add 9 / 6)
    *   farther    : D2 A2 D3 A3 F#4 B4 E5 A5    (widest, lowest)
    * Each note: 0.5 s attack, 0.4 s hold, 3.5-5.5 s decay; entries 70-120 ms apart.
-   * Fundamental peak 0.13/sqrt(n) (.065 .. .046), so the chord sits ≈ -16 dBFS at any size.
+   * Fundamental peak 0.145/sqrt(n) (.073 .. .051). Measured: peak -15 .. -12 dBFS at any size,
+   * audible for 3-3.5 s.
    */
   thread(km: number): void {
     const t = this.now();
@@ -367,8 +388,9 @@ export class AudioEngine {
   /**
    * You released a lantern: a breath of air sweeping upward plus six tiny rising bells
    * D5 F#5 A5 B5 D6 E6, 75 ms apart, drifting left → right.
-   *   bells: peak .045 falling to .028 (≈ -25 dBFS), 1.5 s decay, mostly reverb
-   *   air  : band-passed noise 1.2 → 4.5 kHz over 0.9 s, peak gain .03 (≈ -40 dBFS after the filter)
+   *   bells: peak .11 falling to .068, 1.5 s decay, mostly reverb
+   *   air  : band-passed noise 1.2 → 4.5 kHz over 0.9 s, peak gain .075
+   * Measured: peak ≈ -14.5 dBFS (the six bells pile up briefly), audible for ≈ 1.5 s.
    */
   lantern(): void {
     const t = this.now();
@@ -385,8 +407,9 @@ export class AudioEngine {
 
   /**
    * Opening someone's lantern: a paper/glass tick and one soft tone.
-   *   tick: high-passed noise (3.5 kHz), 6 ms attack, 70 ms decay, peak gain .035
-   *   tone: F#5 (739.99 Hz), peak .045 (×1.34 = .06 ≈ -24 dBFS), 1.6 s decay
+   *   tick: high-passed noise (3.5 kHz), 6 ms attack, 70 ms decay, peak gain .07
+   *   tone: F#5 (739.99 Hz), peak .12, 1.6 s decay
+   * Measured: peak ≈ -17 dBFS.
    */
   lanternOpen(): void {
     const t = this.now();
@@ -397,7 +420,8 @@ export class AudioEngine {
 
   /**
    * Warming a lantern: a small warm pluck. Successive warms step D4 → F#4 → A4 and wrap.
-   *   triangle at the note, peak .085 (≈ -21 dBFS), 0.9 s decay + sine an octave below, peak .045, 1.2 s.
+   *   triangle at the note, peak .125, 0.9 s decay + sine an octave below, peak .065, 1.2 s.
+   * Measured: peak ≈ -15 dBFS.
    */
   warm(): void {
     const t = this.now();
@@ -411,8 +435,9 @@ export class AudioEngine {
   /**
    * A time zone lit. Index 0..23 walks a rising zig-zag over the whole scale:
    *   scale step = floor(i/2) + (i odd ? 2 : 0) → D3 F#3 E3 A3 F#3 B3 … B4 E5 D5 F#5 E5 A5
-   * One bell, fundamental peak .10 × eq (≈ -21 .. -16 dBFS with partials), 2.8 s decay,
-   * panned west → east with the index.
+   * One bell, fundamental peak .165 × eq, 2.8 s decay, panned west → east with the index.
+   * Measured: peak -17.5 .. -13.5 dBFS alone. When zones light in quick succession crowd()
+   * turns each one down: all 24 fired 150 ms apart peak at ≈ -12 dBFS, not -5.
    */
   ringSegment(index: number): void {
     const t = this.now();
@@ -424,12 +449,12 @@ export class AudioEngine {
 
   /**
    * All 24 lit: ~6 s, joyful but calm.
-   *   0.0 s  pad D3 + A3 swells underneath (1.5 s attack, 2.6 s hold, 2.5 s decay; .045 / .035)
+   *   0.0 s  pad D3 + A3 swells underneath (1.5 s attack, 2.6 s hold, 2.5 s decay; .055 / .043)
    *   0.0 s  rising run D4 E4 F#4 A4 B4 D5 E5 F#5 A5 B5 D6, 0.17 s apart (last at 1.70 s)
    *   1.95 s falling cascade D6 A5 B5 F#5 A5 E5 F#5 D5 E5 B4 D5 A4, 0.2 s apart (last at 4.15 s)
    *   4.45 s closing strum D3 · D4 A4 D5 F#5, 60 ms apart, 3.2 s decay
-   * Run/cascade bells: fundamental .07 × eq(m) clamped (.042-.07), 2.0-2.2 s decay. With
-   * ~0.2 s spacing and τ ≈ 0.3 s the overlapping tails sum to ≈ 0.10-0.19 (-20 .. -14 dBFS).
+   * Run/cascade bells: fundamental .088 × min(1, eq(m)), 2.0-2.2 s decay.
+   * Measured: peak ≈ -14.5 dBFS, audible for ≈ 6.5 s.
    */
   ringComplete(): void {
     const t = this.now();
@@ -450,7 +475,7 @@ export class AudioEngine {
   }
 
   /**
-   * Hover/press tick: D6 (1174.66 Hz) sine, peak .012 (≈ -38 dBFS), 50 ms decay.
+   * Hover/press tick: D6 (1174.66 Hz) sine, peak .03 (measured ≈ -31 dBFS), 50 ms decay.
    * Rate-limited to one per 40 ms.
    */
   uiTick(): void {
@@ -480,9 +505,9 @@ export class AudioEngine {
   /**
    * Crowd control for bells that can arrive in bursts (many people joining at once, a run of
    * time zones lighting). Each call adds 1 to a "heat" that cools with a 0.5 s time constant;
-   * the returned gain is 1/sqrt(1 + 0.8 × heat before this call). A lone bell gets 1.0, the
-   * second of a pair 150 ms apart 0.79, a steady 150 ms run settles at 0.55, 30 per second
-   * at 0.27.
+   * the returned gain is 1/sqrt(1 + 2 × heat before this call). A lone bell gets 1.0, the
+   * second of a pair 150 ms apart 0.64, a steady 150 ms run settles at 0.39, 30 per second
+   * at 0.18. Measured: 24 ringSegments 150 ms apart peak ≈ 1 dB above a single one.
    */
   private crowd(key: string, t: number): number {
     const c = this.heat[key] ?? (this.heat[key] = { t, h: 0 });
@@ -570,17 +595,24 @@ export class AudioEngine {
    * Ambient bed. Seven drone voices on root / fifth / ninth (+ a faint third), each with its
    * own slow amplitude LFO; LFO periods are all different primes (23..61 s) so the texture
    * never repeats audibly. Summed through a low-pass whose cutoff drifts 380..860 Hz (47 s).
-   * Plus band-passed noise "air" breathing on a 34 s cycle at ≈ -50 dBFS.
+   * Plus band-passed noise "air" breathing on a 34 s cycle.
    *
-   *   voice            amp   LFO period / depth   gain range
-   *   D2  sine         .50   43 s / 25 %          .375 .. .625
-   *   A2  sine         .34   31 s / 35 %          .221 .. .459
-   *   D3  tri  -5 c    .26   23 s / 40 %          .156 .. .364   (panned L)
-   *   D3  tri  +5 c    .26   29 s / 40 %          .156 .. .364   (panned R)
-   *   A3  sine +3 c    .20   37 s / 45 %          .110 .. .290
-   *   E4  sine         .10   53 s / 60 %          .040 .. .160
-   *   F#4 sine -2 c    .06   61 s / 80 %          .012 .. .108
-   * RMS of the sum ≈ sqrt(Σamp²/2) = sqrt(0.5544/2) ≈ 0.53; × BED_LEVEL .055 ≈ 0.029 ≈ -31 dBFS.
+   *   voice             amp   LFO period / depth   gain range
+   *   D2  sine          .30   43 s / 25 %          .225 .. .375
+   *   A2  sine          .30   31 s / 35 %          .195 .. .405
+   *   D3  tri  -3.5 c   .30   23 s / 40 %          .180 .. .420   (panned L 0.7)
+   *   D3  tri  +3.5 c   .30   29 s / 40 %          .180 .. .420   (panned R 0.7)
+   *   A3  sine +3 c     .26   37 s / 45 %          .143 .. .377
+   *   E4  sine          .14   53 s / 60 %          .056 .. .224
+   *   F#4 sine -2 c     .09   61 s / 80 %          .018 .. .162
+   *
+   * Measured at the output (150 s): -32.5 dBFS RMS, per-second level drifting -30.5 .. -36
+   * with the LFOs, no DC, the six strongest partials (D3 A3 D2 A2 E4 F#4) within 11 dB of
+   * each other. 40 % of the energy is below 120 Hz, which small speakers do not reproduce;
+   * what they do reproduce is ≈ -35 dBFS. (The first version put 70 % below 120 Hz — a bed
+   * that was a 73 Hz hum on headphones and nearly absent on a laptop.) The two D3 voices
+   * beat at 0.6 Hz; panned wide, that is mostly movement between the ears rather than a
+   * change in level.
    */
   private buildBed(ctx: AudioContext, t0: number): void {
     const dry = this.dry!;
@@ -637,8 +669,7 @@ export class AudioEngine {
       this.bedNodes.push(osc, g);
     });
 
-    // air: white noise (RMS ≈ 0.58) → band-pass 1.6 kHz, Q 0.5 (≈ 0.25 RMS) → 0.22 ± 0.10 → bus
-    // 0.25 × 0.22 × 0.055 ≈ 0.003 ≈ -50 dBFS
+    // air: white noise → band-pass 1.6 kHz, Q 0.5 → 0.22 ± 0.10 → bus (through BED_LEVEL)
     if (this.noiseBuf) {
       const src = ctx.createBufferSource();
       src.buffer = this.noiseBuf;
@@ -708,8 +739,8 @@ export class AudioEngine {
   }
 
   /**
-   * One soft bell for a random light: fundamental peak .035 × eq (.025-.044; with partials
-   * ≈ -30 .. -25 dBFS), 2-4 s decay, panned by longitude. With 12+ lights there is a 35 %
+   * One soft bell for a random light: fundamental peak .05 × eq (measured -28 .. -23 dBFS
+   * peak, about the bed's own level), 2-4 s decay, panned by longitude. With 12+ lights there is a 35 %
    * chance of one extra, quieter grace note 0.25-0.7 s later. Never more than two per tick,
    * so density is capped at < 1 note/s however many people are online.
    */
@@ -807,20 +838,28 @@ export class AudioEngine {
   /**
    * 0 → peak → hold → exponential fall. Returns the decay time constant.
    *
-   * Short attacks (< 0.1 s: every bell, pluck and tick) rise on a linear ramp. Measured in
-   * Chromium: if the render clock is already past an exponential-approach attack when it is
-   * scheduled (main thread a few tens of ms behind the audio thread), that event is skipped
-   * and the whole note stays at gain 0 — a silently missing note. A skipped linear ramp
-   * still lands on its end value, so a late note merely starts late.
-   * Slow swells keep the exponential approach (95 % after `attack`): lateness cannot skip
-   * them, and they can be interrupted smoothly at any point by voice stealing.
+   * Short attacks (< 0.1 s: every bell, pluck and tick) are a linear ramp followed by an
+   * explicit setValueAtTime(peak) at the ramp's end. That anchor matters. Chromium clamps
+   * automation events that are already in the past to "now"; measured there, when a whole
+   * attack is in the past (main thread tens of ms behind the render clock: a big output
+   * buffer, or a stall under load) an exponential-approach attack always, and a bare linear
+   * ramp about one time in ten, collapses to gain 0 and the note is silently lost. With the
+   * anchor no note was lost in 900 late starts on a bare graph and 250 through this engine
+   * (scripts/audio-qa.mjs, scenario "late").
+   * A late note then simply starts late, at its peak.
+   *
+   * Slow swells (>= 0.1 s) keep the exponential approach (95 % after `attack`): they are
+   * never wholly in the past, and voice stealing can interrupt them smoothly at any point.
    */
-  private envelope(g: AudioParam, at: number, peak: number, attack: number, hold: number, decay: number, end: number): number {
+  private envelope(g: AudioParam, at: number, peak: number, attack: number, hold: number, decay: number): number {
     const tau = Math.max(0.005, decay / T60);
-    g.setValueAtTime(0, end);
     g.setValueAtTime(0, at);
-    if (attack < 0.1) g.linearRampToValueAtTime(peak, at + attack);
-    else g.setTargetAtTime(peak, at, attack / 3);
+    if (attack < 0.1) {
+      g.linearRampToValueAtTime(peak, at + attack);
+      g.setValueAtTime(peak, at + attack);
+    } else {
+      g.setTargetAtTime(peak, at, attack / 3);
+    }
     g.setTargetAtTime(0, at + attack + hold, tau);
     return tau;
   }
@@ -887,7 +926,7 @@ export class AudioEngine {
         }
         const g = ctx.createGain();
         g.gain.value = 0;
-        this.envelope(g.gain, s.at, peak * p.level, attack, hold, decay * (p.decay ?? 1), end);
+        this.envelope(g.gain, s.at, peak * p.level, attack, hold, decay * (p.decay ?? 1));
         osc.connect(g);
         g.connect(out);
         osc.start(s.at);
@@ -929,7 +968,7 @@ export class AudioEngine {
       }
       const g = ctx.createGain();
       g.gain.value = 0;
-      this.envelope(g.gain, s.at, peak, attack, hold, decay, end);
+      this.envelope(g.gain, s.at, peak, attack, hold, decay);
       src.connect(f);
       f.connect(g);
       // random offset so repeated ticks are not the identical grain of noise

@@ -296,10 +296,13 @@ describe('AudioEngine on a fake AudioContext', () => {
     expect(nodes.length).toBeGreaterThan(before);
     checkRecords();
 
-    // event envelopes stay conservative: no single partial above 0.25 (≈ -12 dBFS)
-    const eventGains = records.filter((r) => r.method === 'setTarget' && r.kind === 'gain' && nodes.indexOf(r.node) >= before);
+    // event envelopes stay conservative: no single partial above 0.3 (≈ -10.5 dBFS; the measured
+    // output peak of the loudest event, waveIn, is ≈ -10 dBFS — see scripts/audio-qa.mjs)
+    const eventGains = records.filter(
+      (r) => ['setTarget', 'linearRamp', 'setValueAtTime'].includes(r.method) && r.kind === 'gain' && nodes.indexOf(r.node) >= before,
+    );
     expect(eventGains.length).toBeGreaterThan(0);
-    for (const r of eventGains) expect(r.value).toBeLessThanOrEqual(0.25);
+    for (const r of eventGains) expect(r.value).toBeLessThanOrEqual(0.3);
 
     // every oscillator frequency in events is a harmonic (1..4) of a D-pentatonic pitch, or a glide endpoint of one
     for (const r of records) {
@@ -367,6 +370,65 @@ describe('AudioEngine on a fake AudioContext', () => {
     const last = out.filter((o) => Math.abs(o.at - (t0 + 2)) < 1e-6);
     expect(last.length).toBeGreaterThan(0);
     expect(last[0]!.f).toBeGreaterThan(out[0]!.f); // rising
+    e.dispose();
+  });
+
+  it('short attacks are a linear ramp anchored at the peak (a late-scheduled note must not be lost)', async () => {
+    // Measured in Chromium: when a whole attack is already in the past, an exponential-approach
+    // attack (and sometimes a bare ramp) collapses to gain 0. The setValueAtTime anchor prevents it.
+    const e = new AudioEngine();
+    await e.start();
+    const mark = records.length;
+    e.lightJoined(0);
+    const env = records.slice(mark).filter((r) => r.kind === 'gain' && r.method !== 'value');
+    const ramps = env.filter((r) => r.method === 'linearRamp');
+    expect(ramps.length).toBe(3); // fundamental + two partials
+    for (const ramp of ramps) {
+      const own = env.filter((r) => r.node === ramp.node);
+      expect(own.map((r) => r.method)).toEqual(['setValueAtTime', 'linearRamp', 'setValueAtTime', 'setTarget']);
+      expect(own[0]!.value).toBe(0);
+      expect(own[2]!.value).toBe(ramp.value); // anchor = peak
+      expect(own[2]!.time).toBe(ramp.time); // at the end of the ramp
+      expect(own[3]!.value).toBe(0);
+      expect(own[3]!.time).toBeGreaterThanOrEqual(ramp.time);
+    }
+    e.dispose();
+  });
+
+  it('schedules further ahead on outputs with a large buffer', async () => {
+    const e = new AudioEngine();
+    await e.start();
+    contexts[0]!.advance(5);
+    let before = nodes.length;
+    e.lightJoined(0);
+    expect(Math.min(...nodes.slice(before).filter((n) => n.startTime !== null).map((n) => n.startTime!))).toBeCloseTo(5.03, 6);
+    (contexts[0] as unknown as { baseLatency: number }).baseLatency = 0.08;
+    before = nodes.length;
+    e.lightJoined(0);
+    expect(Math.min(...nodes.slice(before).filter((n) => n.startTime !== null).map((n) => n.startTime!))).toBeCloseTo(5.095, 6);
+    e.dispose();
+  });
+
+  it('bells arriving in a burst get quieter, and recover after a pause', async () => {
+    const e = new AudioEngine();
+    await e.start();
+    const peakOf = (fn: () => void): number => {
+      const mark = records.length;
+      fn();
+      return Math.max(...records.slice(mark).filter((r) => r.method === 'linearRamp' && r.kind === 'gain').map((r) => r.value));
+    };
+    for (const fn of [() => e.lightJoined(0), () => e.ringSegment(12)]) {
+      const first = peakOf(fn);
+      let last = first;
+      for (let i = 0; i < 20; i++) {
+        const p = peakOf(fn);
+        expect(p).toBeLessThan(last);
+        last = p;
+      }
+      expect(last).toBeLessThan(first * 0.3);
+      contexts[0]!.advance(contexts[0]!.currentTime + 30);
+      expect(peakOf(fn)).toBeCloseTo(first, 6);
+    }
     e.dispose();
   });
 

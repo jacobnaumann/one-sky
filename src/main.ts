@@ -7,7 +7,7 @@ import { Globe, type LightDot, type Pick } from './globe/globe';
 import { Sky, type Person, type Lantern, type Thread, type Echo, type ZoneDay, type Stats, type Me } from './net/sky';
 import { AudioEngine } from './audio/engine';
 import { placeForTimeZone, placeForOffset, searchPlaces, jitter, PLACES, type Place } from './lib/tz';
-import { localTimeString, zoneIndex, zoneLabel, utcDay, relativeTime } from './lib/time';
+import { localTimeString, zoneIndex, zoneLabel, utcDay, relativeTime, utcOffsetMinutes } from './lib/time';
 import { skyState, solarElevation } from './lib/sun';
 import { greatCircleKm, formatKm } from './lib/geo';
 import { questionForDay, QUESTIONS } from './lib/questions';
@@ -53,6 +53,8 @@ const wavedAt = new Map<string, number>();      // uid → when I last waved at 
 const wavedBy = new Map<string, number>();      // uid → when they last waved at me
 let ringWasComplete = false;
 
+const echoKey = (e: Echo) => `echo:${e.lat},${e.lon},${e.place}`;
+const echoById = (id: string) => echoes.find((e) => echoKey(e) === id);
 const placeLine = (city: string, country: string) => (country && country !== city ? `${city}, ${country}` : city);
 const skyLine = (lat: number, lon: number, tz: string) => `${localTimeString(tz)} · ${skyState(lat, lon, new Date())}`;
 const others = () => [...sky.people.values()].filter((p) => p.id !== sky.uid);
@@ -66,9 +68,13 @@ function refreshLights() {
   if (entered) { dots.push({ id: 'self', lat: me.lat, lon: me.lon, kind: 'self' }); taken.push(me); }
   for (const p of others()) { dots.push({ id: p.id, lat: p.lat, lon: p.lon, kind: 'live' }); taken.push(p); }
   const now = Date.now();
-  echoes.forEach((e, i) => {
+  const seenEcho = new Set<string>();
+  echoes.forEach((e) => {
+    const key = echoKey(e);
+    if (seenEcho.has(key)) return;
+    seenEcho.add(key);
     if (taken.some((t) => Math.abs(t.lat - e.lat) < 0.02 && Math.abs(t.lon - e.lon) < 0.02)) return;
-    dots.push({ id: `echo:${i}`, lat: e.lat, lon: e.lon, kind: 'echo', age: (now - Date.parse(e.last_seen)) / 3600000 });
+    dots.push({ id: key, lat: e.lat, lon: e.lon, kind: 'echo', age: (now - Date.parse(e.last_seen)) / 3600000 });
   });
   globe.setLights(dots);
   audio.setLights(dots.filter((d) => d.kind !== 'echo').map((d) => ({ id: d.id, lat: d.lat, lon: d.lon })));
@@ -83,11 +89,14 @@ function refreshLanterns() {
 function renderCensus() {
   const n = liveCount();
   const el = $('census');
+  const sig = `${sky.uid ? 1 : 0}|${n}|${entered}|${stats.lights_48h}`;
+  if (el.dataset.sig === sig) return;
+  el.dataset.sig = sig;
   el.replaceChildren();
   if (!sky.uid) { el.textContent = 'Finding the others…'; return; }
   const live = n === 0 ? 'No lights awake yet' : n === 1 ? (entered ? 'You are the only light awake' : '1 light awake') : `${n} lights awake`;
   el.append(h('b', {}, live));
-  if (stats.lights_48h > 0) el.append(h('span', { class: 'wide' }, ` · ${stats.lights_48h.toLocaleString('en-US')} in the last two days`));
+  if (stats.lights_48h > 1) el.append(h('span', { class: 'wide' }, ` · ${stats.lights_48h.toLocaleString('en-US')} in the last two days`));
 }
 
 function renderYou() {
@@ -130,7 +139,7 @@ function ringHint(z: number | null) {
   if (z !== null) {
     const lit = zonesLit.get(z);
     el.textContent = lit
-      ? `${zoneLabel(z)} · lit by ${lit.place}${z === me.zone ? ' — your zone' : ''}`
+      ? `${z === me.zone ? myZoneLabel() : zoneLabel(z)} · lit by ${lit.place}${z === me.zone ? ' — your zone' : ''}`
       : `${zoneLabel(z)} · still dark. Know someone near ${zoneCity(z)}?`;
     return;
   }
@@ -161,13 +170,20 @@ function renderRing(flash = true) {
   ringWasComplete = complete;
 }
 
+/** The visitor's own offset as a label; unlike the 24-band index this is right for UTC+13 and +14. */
+function myZoneLabel() {
+  const off = Math.round(utcOffsetMinutes(me.tz) / 60);
+  return off === 0 ? 'UTC±0' : `UTC${off > 0 ? '+' : '−'}${Math.abs(off)}`;
+}
+
 function lightZone(z: ZoneDay, announce: boolean) {
+  if (z.day > today) rollDay(z.day); // the server is already in the new day
   if (z.day !== today || zonesLit.has(z.zone)) return;
   zonesLit.set(z.zone, z);
   renderRing(announce);
   if (announce && entered) {
     audio.ringSegment(zonesLit.size - 1);
-    if (z.zone === me.zone) feed(rich(['You lit ', { b: zoneLabel(z.zone) }, ' for the world today']));
+    if (z.zone === me.zone) feed(rich(z.place === me.city ? ['You lit ', { b: myZoneLabel() }, ' for the world today'] : ['Your zone, ', { b: myZoneLabel() }, ', is lit']));
     else feed(rich([{ b: zoneLabel(z.zone) }, ` is lit — first light from ${z.place}`]));
   }
 }
@@ -208,14 +224,16 @@ function updateLabels() {
   const people = others();
   const show = people.length <= 14;
   const seen = new Set<string>();
-  for (const p of people) {
+  if (!show || !entered) { for (const el of liveLabels.values()) el.classList.add('off'); }
+  else for (const p of people) {
     seen.add(p.id);
     let el = liveLabels.get(p.id);
     if (!el) { el = h('div', { class: 'label off' }, p.city); liveLabels.set(p.id, el); labelLayer.append(el); }
     if (el.textContent !== p.city) el.textContent = p.city;
-    place(el, globe.project(p.lat, p.lon), show && entered);
+    place(el, globe.project(p.lat, p.lon), true);
   }
-  for (const [id, el] of liveLabels) if (!seen.has(id)) { el.remove(); liveLabels.delete(id); }
+  if (show && entered) for (const [id, el] of liveLabels) if (!seen.has(id)) { el.remove(); liveLabels.delete(id); }
+  if (liveLabels.size > 60) { for (const el of liveLabels.values()) el.remove(); liveLabels.clear(); }
 
   if (spot && performance.now() > spot.until) spot = null;
   if (spot) place(spotLabel, globe.project(spot.lat, spot.lon), true); else spotLabel.classList.add('off');
@@ -234,14 +252,15 @@ function selectionPoint(): { lat: number; lon: number; r?: number } | null {
     const l = lanterns.get(selection.id);
     return l ? { lat: l.lat, lon: l.lon, r: globe.lanternRadius(l.id) } : null;
   }
-  if (selection.id.startsWith('echo:')) return echoes[Number(selection.id.slice(5))] ?? null;
+  if (selection.id.startsWith('echo:')) return echoById(selection.id) ?? null;
   return sky.people.get(selection.id) ?? null;
 }
 
 // ───────────────────────── card ─────────────────────────
 
 const card = $('card');
-function closeCard() { if (drift) stopDrift(); selection = null; card.hidden = true; card.replaceChildren(); globe.autoRotate = true; }
+let repaintLantern: (() => void) | null = null;
+function closeCard() { if (drift) stopDrift(); repaintLantern = null; selection = null; card.hidden = true; card.replaceChildren(); globe.autoRotate = true; }
 
 function select(pick: Pick | null, fly = true) {
   if (!pick) { closeCard(); return; }
@@ -256,13 +275,16 @@ function select(pick: Pick | null, fly = true) {
 
 function renderCard() {
   if (!selection) return;
+  repaintLantern = null;
+  const hadFocus = card.contains(document.activeElement);
   card.replaceChildren(h('button', { class: 'card-close', 'aria-label': 'Close', onclick: closeCard }, '×'));
   if (selection.type === 'lantern') renderLanternCard(selection.id);
-  else if (selection.id.startsWith('echo:')) renderEchoCard(Number(selection.id.slice(5)));
+  else if (selection.id.startsWith('echo:')) renderEchoCard(selection.id);
   else renderPersonCard(selection.id);
   card.hidden = false;
   // restart the entrance animation
   card.style.animation = 'none'; void card.offsetWidth; card.style.animation = '';
+  if (hadFocus) card.querySelector<HTMLElement>('.btn')?.focus();
 }
 
 function facts(rows: [string, string][]) {
@@ -295,8 +317,8 @@ function renderPersonCard(id: string) {
   );
 }
 
-function renderEchoCard(i: number) {
-  const e = echoes[i];
+function renderEchoCard(id: string) {
+  const e = echoById(id);
   if (!e) { closeCard(); return; }
   card.append(
     h('p', { class: 'eyebrow' }, 'An echo'),
@@ -324,6 +346,7 @@ function renderLanternCard(id: string) {
     );
   };
   paintWarm();
+  repaintLantern = paintWarm;
   warmBtn.addEventListener('click', async () => {
     if (marks.warmed.has(id)) return;
     marks.warmed.add(id);
@@ -388,14 +411,18 @@ async function doWave(p: Person) {
   wavedAt.set(p.id, Date.now());
   const { seconds, landed } = globe.wave(me, p);
   audio.waveOut(me.lon, p.lon, seconds);
-  if (selection?.id === p.id) { renderCard(); setTimeout(() => { if (selection?.id === p.id) renderCard(); }, 8100); }
+  const btn = selection?.id === p.id ? card.querySelector<HTMLButtonElement>('.actions .btn.primary') : null;
+  if (btn) {
+    btn.disabled = true; btn.textContent = 'Wave sent';
+    setTimeout(() => { if (btn.isConnected) { btn.disabled = false; btn.textContent = Date.now() - (wavedBy.get(p.id) ?? 0) < 600000 ? 'Wave back' : 'Wave again'; } }, 8100);
+  }
   try {
     const t = await sky.wave(p);
     await landed;
     if (t) { marks.threads.add(t.id); addThread(t, true, { mine: true, other: p.city }); }
     else feed(rich(['Your wave reached ', { b: p.city }]));
   } catch (e: any) {
-    if (String(e?.message).includes('rate_limited')) toast(rich(['That’s a lot of waving. Give it a minute.']), { plain: true });
+    toast(rich([String(e?.message).includes('rate_limited') ? 'That’s a lot of waving. Give it a minute.' : 'That wave didn’t get through. Try again in a moment.']), { plain: true });
   }
 }
 
@@ -546,6 +573,7 @@ function openComposer() {
 // ───────────────────────── move my light ─────────────────────────
 
 function openMove() {
+  stopDrift();
   modal((close) => {
     const input = h('input', { type: 'search', placeholder: 'Search a city or country', 'aria-label': 'Search places', autocomplete: 'off', 'data-autofocus': true });
     const list = h('div', { class: 'places', role: 'listbox' });
@@ -583,6 +611,7 @@ function openMove() {
 // ───────────────────────── about ─────────────────────────
 
 function openAbout() {
+  stopDrift();
   modal(() => h('div', {},
     h('p', { class: 'eyebrow' }, 'About'),
     h('h2', {}, 'Everyone under one sky'),
@@ -595,13 +624,14 @@ function openAbout() {
       h('div', {}, h('i', { class: 'b' }), h('p', {}, h('strong', {}, 'An echo'), ' is someone who was here in the last two days and has gone.')),
     ),
     h('p', {}, h('strong', {}, 'Privacy.'), ' No account, no name, no tracking. Your light sits near the main city of your time zone — taken from your device’s clock, not your location — and you can move it. Lanterns are public and anonymous.'),
-    h('p', { class: 'fine' }, 'Nobody on this globe is simulated. Earth imagery: NASA Blue Marble and Black Marble. Drag to turn, scroll or pinch to zoom, arrow keys work too.'),
+    h('p', { class: 'fine' }, 'Nobody on this globe is simulated. Earth imagery: NASA Blue Marble and Black Marble. Drag to turn, scroll or pinch to zoom. Keyboard: arrows turn, + and − zoom, [ and ] step through lights and lanterns, Enter acts, R sends a ripple.'),
   ), { label: 'About One Sky' });
 }
 
 // ───────────────────────── postcard ─────────────────────────
 
 async function openPostcard() {
+  stopDrift();
   const shot = globe.capture();
   const url = await makePostcard(shot, {
     place: me.city, lights: liveCount(), zones: zonesLit.size, threads: stats.threads_total, km: stats.km_total, question: question.text,
@@ -625,7 +655,11 @@ async function openPostcard() {
 
 function wireSky() {
   sky.knownLantern = (id) => lanterns.has(id);
-  sky.on('status', (online) => { $('offline').hidden = online || !entered; });
+  sky.on('status', (online) => {
+    $('offline').hidden = online || !entered;
+    if (online && droppedOnce && worldLoaded) void resync();
+    if (!online) droppedOnce = true;
+  });
 
   sky.on('people', (_all, joined, left) => {
     refreshLights();
@@ -643,7 +677,7 @@ function wireSky() {
         echoes.unshift({ lat: p.lat, lon: p.lon, place: p.city, last_seen: new Date().toISOString() });
       });
       if (echoes.length > 400) echoes.length = 400;
-      if (left.length) { if (selection?.id.startsWith('echo:')) closeCard(); refreshLights(); }
+      if (left.length) refreshLights();
     }
     for (const p of left) { wavedBy.delete(p.id); wavedAt.delete(p.id); }
     if (selection?.type === 'light' && !selection.id.startsWith('echo:') && !sky.people.has(selection.id)) closeCard();
@@ -666,7 +700,7 @@ function wireSky() {
       if (selection?.id === from.id) renderCard();
       toast(
         rich([{ b: `Someone in ${from.city} waved at you.` }, { small: `It is ${localTimeString(from.tz)} there · ${formatKm(greatCircleKm(me.lat, me.lon, from.lat, from.lon))} away` }]),
-        { ms: 14000, action: { label: 'Wave back', run: () => { const p = sky.people.get(from.id); if (p) { select({ type: 'light', id: p.id }); void doWave(p); } } } },
+        { ms: 14000, action: { label: 'Wave back', run: () => { const p = sky.people.get(from.id); if (p) { select({ type: 'light', id: p.id }); void doWave(p); } else toast(rich([`The light in ${from.city} has gone out. Their echo stays for two days.`]), { plain: true }); } } },
       );
     });
   });
@@ -700,10 +734,17 @@ function wireSky() {
 
   sky.on('lantern', (l, fresh) => {
     const known = lanterns.has(l.id);
+    const before = lanterns.get(l.id)?.warmth ?? 0;
     lanterns.set(l.id, l);
+    if (!fresh && entered && marks.lanterns.has(l.id) && l.warmth > before) {
+      // someone, somewhere, just warmed what I wrote
+      audio.warm();
+      feed(rich(['Someone just warmed ', { b: 'your lantern' }]));
+      store.set('onesky.warmthSeen', String(Number(store.get('onesky.warmthSeen') ?? 0) + (l.warmth - before)));
+    }
     refreshLanterns();
     if (fresh && !known && entered && !marks.lanterns.has(l.id)) feed(rich(['A lantern rose over ', { b: l.place }]));
-    if (selection?.type === 'lantern' && selection.id === l.id && !fresh) renderCard();
+    if (selection?.type === 'lantern' && selection.id === l.id && !fresh) repaintLantern?.();
   });
   sky.on('lanternHidden', (id) => {
     lanterns.delete(id); refreshLanterns();
@@ -717,32 +758,75 @@ async function loadWorld() {
   mk.lanterns.forEach((x) => marks.lanterns.add(x)); mk.warmed.forEach((x) => marks.warmed.add(x)); mk.threads.forEach((x) => marks.threads.add(x));
   for (const l of ls) lanterns.set(l.id, l);
   for (const t of ts.reverse()) { if (!threads.has(t.id)) { threads.set(t.id, t); globe.addThread(t.id, { lat: t.a_lat, lon: t.a_lon }, { lat: t.b_lat, lon: t.b_lon }, false); } }
-  echoes = es;
+  if (es) echoes = es;
   if (st) stats = st;
   for (const z of zs) zonesLit.set(z.zone, z);
   ringWasComplete = zonesLit.size === 24;
   refreshLanterns(); refreshLights(); renderStats(); renderRing(false);
 }
 
+let worldLoaded = false;
+let droppedOnce = false;
+/** After a reconnect or a long sleep, fetch whatever happened while we were away. */
+async function resync() {
+  try {
+    const [ls, ts, zs] = await Promise.all([sky.lanterns(), sky.threads(), sky.zones(today)]);
+    for (const l of ls) lanterns.set(l.id, l);
+    for (const t of ts.reverse()) addThread(t, false);
+    for (const z of zs) lightZone(z, false);
+    refreshLanterns();
+    void refreshWorld();
+  } catch { /* still offline; the next reconnect tries again */ }
+}
+
+/** Connect and load the world; keep trying with backoff if the network or sign-in fails. */
+async function bringUp(attempt = 0): Promise<void> {
+  try {
+    await sky.connect();
+    if (!worldLoaded) { await loadWorld(); worldLoaded = true; }
+    updateArrivalCount(); renderCensus();
+  } catch (e) {
+    console.warn('One Sky is offline', e);
+    if (!entered) $('arrival-eyebrow').textContent = 'The sky is out of reach right now — you can still look.';
+    setTimeout(() => void bringUp(attempt + 1), Math.min(30000, 2000 * 2 ** attempt));
+  }
+}
+
 async function refreshWorld() {
   if (!sky.uid || document.hidden) return;
   const [st, es] = await Promise.all([sky.stats(), sky.echoes()]).catch(() => [null, null] as const);
   if (st) { stats = st; renderStats(); }
-  if (es) { echoes = es; if (selection?.id.startsWith('echo:')) closeCard(); refreshLights(); }
+  if (es) { echoes = es; if (selection?.id.startsWith('echo:') && !echoById(selection.id)) closeCard(); refreshLights(); }
   // drop lanterns that have drifted past 48 hours
   const cutoff = Date.now() - 48 * 3600 * 1000;
   let dropped = false;
-  for (const [id, l] of lanterns) if (!l.seeded && Date.parse(l.created_at) < cutoff) { lanterns.delete(id); dropped = true; }
+  for (const [id, l] of lanterns) if (!l.seeded && Date.parse(l.created_at) < cutoff) { lanterns.delete(id); dropped = true; if (selection?.id === id) closeCard(); }
   if (dropped) refreshLanterns();
 }
 
-function rollDay() {
-  const d = utcDay();
-  if (d === today) return;
+function rollDay(force?: string) {
+  const d = force ?? utcDay();
+  if (d <= today) return;
   today = d; question = questionForDay(d);
   $('ask-q').textContent = question.text;
   zonesLit.clear(); ringWasComplete = false; renderRing(false);
+  // whoever rolled over before us may already have lit zones for the new day
+  void sky.zones(today).then((zs) => zs.forEach((z) => lightZone(z, false))).catch(() => {});
   if (entered) { void sky.checkIn(); feed(rich(['A new day began in UTC. The ring starts again.']), true); }
+}
+
+/** On return: has anyone warmed my lanterns since I last looked? */
+function tellWarmthSinceLastVisit() {
+  let total = 0, n = 0, where = '';
+  for (const id of marks.lanterns) { const l = lanterns.get(id); if (l) { total += l.warmth; n++; where = l.place; } }
+  const seen = Number(store.get('onesky.warmthSeen') ?? 0);
+  store.set('onesky.warmthSeen', String(total));
+  const gained = total - seen;
+  if (n === 0 || gained <= 0) return;
+  toast(rich([
+    { b: n === 1 ? `Your lantern over ${where} was warmed ${gained === 1 ? 'once' : `${gained} times`} while you were away.` : `Your lanterns were warmed ${gained === 1 ? 'once' : `${gained} times`} while you were away.` },
+    { small: 'Someone, somewhere, read what you wrote.' },
+  ]), { ms: 10000 });
 }
 
 // ───────────────────────── arrival ─────────────────────────
@@ -754,7 +838,7 @@ function updateArrivalCount() {
   el.replaceChildren();
   if (!sky.uid) { el.textContent = 'Looking for the others…'; return; }
   if (n > 0) el.append(h('b', {}, `${n} ${n === 1 ? 'person is' : 'people are'}`), ' here right now');
-  else if (stats.lights_48h > 0) el.append(h('b', {}, `${stats.lights_48h.toLocaleString('en-US')} ${stats.lights_48h === 1 ? 'person has' : 'people have'}`), ' been here in the last two days');
+  else if (stats.lights_48h > 1) el.append(h('b', {}, `${stats.lights_48h.toLocaleString('en-US')} people have`), ' been here in the last two days');
   else el.textContent = 'The sky is quiet. Be its first light.';
 }
 
@@ -774,12 +858,15 @@ async function enter() {
   globe.revealAll();
   const flight = globe.flyTo(me.lat, me.lon, globe.homeDist(), reducedMotion ? 300 : 5600);
 
-  setTimeout(() => {
+  const settled = Promise.race([(window as any).__onesky.firstContact as Promise<void>, new Promise((r) => setTimeout(r, 2500))]);
+  setTimeout(() => void settled.then(() => {
     const n = others().length + 1;
+    const before = stats.lights_48h;
     if (n > 1) interlude(rich(['You are one of ', { em: `${n} lights` }, ' under one sky.']));
-    else if (stats.lights_48h > 0) interlude(rich(['Right now, yours is ', { em: 'the only light.' }, ` ${stats.lights_48h.toLocaleString('en-US')} were here before you.`]));
-    else interlude(rich(['Yours is ', { em: 'the first light' }, ' under this sky.']));
-  }, reducedMotion ? 0 : 900);
+    else if (!sky.uid) interlude(rich(['The Earth, ', { em: 'as it is right now.' }]));
+    else if (before > 1) interlude(rich(['Right now, yours is ', { em: 'the only light.' }, ` ${before.toLocaleString('en-US')} have passed through in two days.`]));
+    else interlude(rich(['Right now, yours is ', { em: 'the only light' }, ' under this sky.']));
+  }), reducedMotion ? 0 : 900);
 
   setTimeout(() => {
     entered = true;
@@ -792,6 +879,7 @@ async function enter() {
   await flight;
   $('app').classList.remove('is-hidden');
   globe.canvas.focus({ preventScroll: true });
+  setTimeout(tellWarmthSinceLastVisit, 4200);
   if (!store.get('onesky.seen')) {
     store.set('onesky.seen', '1');
     setTimeout(() => {
@@ -842,7 +930,7 @@ function boot() {
       const l = lanterns.get(pick.id); if (!l) { tip.hidden = true; return; }
       tip.append(l.body.length > 64 ? `“${l.body.slice(0, 62)}…”` : `“${l.body}”`, h('small', {}, `a lantern over ${l.place}`));
     } else if (pick.id.startsWith('echo:')) {
-      const e = echoes[Number(pick.id.slice(5))]; if (!e) { tip.hidden = true; return; }
+      const e = echoById(pick.id); if (!e) { tip.hidden = true; return; }
       tip.append(e.place, h('small', {}, `an echo · here ${relativeTime(e.last_seen)}`));
     } else {
       const p = sky.people.get(pick.id); if (!p) { tip.hidden = true; return; }
@@ -858,6 +946,19 @@ function boot() {
     else if (k === 'ArrowUp') globe.nudge(0, 5); else if (k === 'ArrowDown') globe.nudge(0, -5);
     else if (k === '+' || k === '=') globe.zoom(0.88); else if (k === '-' || k === '_') globe.zoom(1.14);
     else if (k === 'r' || k === 'R') doRipple();
+    else if (k === ']' || k === '[') {
+      if (!entered) return;
+      const stops: Pick[] = [
+        ...others().sort((a, b) => a.lon - b.lon).map((p) => ({ type: 'light' as const, id: p.id })),
+        ...[...lanterns.values()].sort((a, b) => a.lon - b.lon).map((l) => ({ type: 'lantern' as const, id: l.id })),
+      ];
+      if (!stops.length) return;
+      const at = stops.findIndex((x) => x.id === selection?.id);
+      const next = at < 0 ? 0 : (at + (k === ']' ? 1 : -1) + stops.length) % stops.length;
+      stopDrift();
+      select(stops[next]);
+    }
+    else if (k === 'Enter') { const b = card.querySelector<HTMLElement>('.btn'); if (!card.hidden && b) b.focus(); else return; }
     else if (k === 'Escape') { stopDrift(); closeCard(); } else return;
     e.preventDefault();
   });
@@ -880,19 +981,18 @@ function boot() {
     $('btn-sound').setAttribute('aria-pressed', String(!audio.muted));
   });
   const baseTitle = document.title;
-  document.addEventListener('visibilitychange', () => { if (document.hidden) audio.suspend(); else { document.title = baseTitle; audio.resume(); void refreshWorld(); } });
+  document.addEventListener('visibilitychange', () => { if (document.hidden) audio.suspend(); else { document.title = baseTitle; audio.resume(); if (worldLoaded) void resync(); } });
 
   // The button unlocks as soon as the Earth can be drawn; the network may still be arriving.
   void globe.ready.then(() => $('btn-enter').removeAttribute('disabled'), () => $('btn-enter').removeAttribute('disabled'));
 
   wireSky();
-  sky.connect().then(loadWorld).then(() => { updateArrivalCount(); renderCensus(); }).catch((e) => {
-    console.warn('One Sky is offline', e);
-    $('arrival-eyebrow').textContent = 'The sky is out of reach right now — you can still look.';
-  });
+  const firstContact = bringUp();
+  addEventListener('online', () => { if (!sky.uid) void bringUp(); });
+  (window as any).__onesky.firstContact = firstContact;
 
   // slow clocks
-  setInterval(() => { renderYou(); rollDay(); if (selection && selection.type === 'light' && !selection.id.startsWith('echo:')) { /* keep their time fresh */ const b = card.querySelector('.facts dd'); const p = sky.people.get(selection.id); if (b && p) b.textContent = localTimeString(p.tz); } }, 15000);
+  setInterval(() => { renderYou(); rollDay(); if (selection && selection.type === 'light' && !selection.id.startsWith('echo:')) { /* keep their time fresh */ const b = card.querySelector('.facts dd'); const p = sky.people.get(selection.id); if (b && p) { const t = localTimeString(p.tz); if (b.textContent !== t) b.textContent = t; } } }, 15000);
   setInterval(() => void refreshWorld(), 90000);
   setInterval(() => { if (entered) void sky.checkIn().catch(() => {}); }, 10 * 60 * 1000);
 

@@ -52,6 +52,7 @@ export class Sky {
   private me: Me | null = null;
   private tracking = false;
   private handlers: { [K in keyof Events]?: Events[K][] } = {};
+  private authWatched = false;
   private goneAt = new Map<string, number>();
   private goneTimer: ReturnType<typeof setTimeout> | undefined;
   private lastWaveFrom = new Map<string, number>();
@@ -74,6 +75,19 @@ export class Sky {
 
   /** Sign in anonymously (or reuse the stored session) and join the sky as a watcher. */
   async connect(): Promise<void> {
+    if (this.ch) return;
+    if (!this.authWatched) {
+      this.authWatched = true;
+      // If the anonymous user is ever signed out (expired, pruned), start again as a new one.
+      this.db.auth.onAuthStateChange((ev) => {
+        if (ev !== 'SIGNED_OUT' || !this.uid) return;
+        this.uid = null;
+        const old = this.ch; this.ch = null;
+        if (old) void this.db.removeChannel(old);
+        if (this.online) { this.online = false; this.emit('status', false); }
+        setTimeout(() => void this.connect().catch(() => {}), 1500);
+      });
+    }
     const { data } = await this.db.auth.getSession();
     if (data.session?.user) this.uid = data.session.user.id;
     else {
@@ -83,6 +97,7 @@ export class Sky {
     }
     await this.db.realtime.setAuth();
     this.join();
+    if (this.tracking) void this.checkIn();
   }
 
   private join() {
@@ -102,8 +117,10 @@ export class Sky {
       const from = this.people.get(payload.from);
       if (!from || payload.from === this.uid) return;
       const now = Date.now();
-      if (now - (this.lastWaveFrom.get(from.id) ?? 0) < 3000) return;
-      this.lastWaveFrom.set(from.id, now);
+      const pair = `${from.id}|${payload.to}`;
+      if (now - (this.lastWaveFrom.get(pair) ?? 0) < 3000) return;
+      if (this.lastWaveFrom.size > 4000) this.lastWaveFrom.clear();
+      this.lastWaveFrom.set(pair, now);
       const to = payload.to === this.uid ? null : this.people.get(payload.to);
       if (payload.to !== this.uid && !to) return;
       this.emit('wave', { from, to: payload.to, target: to ? { lat: to.lat, lon: to.lon } : null });
@@ -129,6 +146,10 @@ export class Sky {
       const ok = status === 'SUBSCRIBED';
       if (ok !== this.online) { this.online = ok; this.emit('status', ok); }
       if (ok && this.tracking && this.me) void ch.track(this.presencePayload());
+      // CHANNEL_ERROR and TIMED_OUT rejoin by themselves; a server-side close does not.
+      if (status === 'CLOSED' && this.ch === ch) {
+        setTimeout(() => { if (this.ch === ch && this.uid) { void this.db.removeChannel(ch); this.join(); } }, 2500);
+      }
     });
   }
 
@@ -165,7 +186,7 @@ export class Sky {
     if (this.goneAt.size) { clearTimeout(this.goneTimer); this.goneTimer = setTimeout(() => this.syncPeople(), 3600); }
     const joined: Person[] = [], left: Person[] = [];
     for (const [id, p] of next) if (!this.people.has(id)) joined.push(p);
-    for (const [id, p] of this.people) if (!next.has(id)) { left.push(p); this.lastWaveFrom.delete(id); this.lastRippleFrom.delete(id); }
+    for (const [id, p] of this.people) if (!next.has(id)) { left.push(p); this.lastRippleFrom.delete(id); }
     this.people = next;
     this.emit('people', next, joined, left);
   }
@@ -231,8 +252,9 @@ export class Sky {
     const { data } = await this.db.from('threads').select(THREAD_COLS).order('created_at', { ascending: false }).limit(160);
     return (data ?? []).map((r) => this.cleanThread(r)).filter(Boolean) as Thread[];
   }
-  async echoes(): Promise<Echo[]> {
-    const { data } = await this.db.rpc('recent_echoes');
+  async echoes(): Promise<Echo[] | null> {
+    const { data, error } = await this.db.rpc('recent_echoes');
+    if (error) return null;
     return ((data as any[]) ?? []).filter((e) => typeof e.lat === 'number' && typeof e.lon === 'number')
       .map((e) => ({ lat: e.lat, lon: e.lon, place: str(e.place, 60), last_seen: str(e.last_seen, 40) }));
   }

@@ -128,7 +128,13 @@ export class Globe {
     this.buildAtmosphere();
     this.buildDots();
     this.buildRing();
-    this.ready = this.buildEarth();
+    this.ready = this.buildEarth().catch(async () => {
+      try { await this.buildEarth(); } catch {
+        const dark = new THREE.Mesh(new THREE.SphereGeometry(1, 64, 48), new THREE.MeshBasicMaterial({ color: 0x05070d }));
+        dark.renderOrder = 1;
+        this.scene.add(dark);
+      }
+    });
 
     if (!opts.lowPower) {
       this.composer = new EffectComposer(this.renderer);
@@ -487,7 +493,9 @@ export class Globe {
   private bind() {
     const el = this.canvas;
     el.style.touchAction = 'none';
+    el.addEventListener('contextmenu', (e) => e.preventDefault());
     el.addEventListener('pointerdown', (e) => {
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
       el.setPointerCapture(e.pointerId);
       this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
       if (this.pointers.size === 1) {
@@ -507,6 +515,8 @@ export class Globe {
       const r = el.getBoundingClientRect();
       this.pointerNdc = e.pointerType === 'mouse' ? { x: e.clientX - r.left, y: e.clientY - r.top } : null;
       const prev = this.pointers.get(e.pointerId);
+      // a mouse whose button-up we never saw (context menu, lost capture) is no longer dragging
+      if (prev && e.pointerType === 'mouse' && e.buttons === 0) { this.release(e.pointerId); return; }
       if (!prev) {
         if (e.pointerType === 'mouse') this.onHover(this.pick(e.clientX - r.left, e.clientY - r.top), { x: e.clientX, y: e.clientY });
         return;
@@ -544,6 +554,7 @@ export class Globe {
     };
     el.addEventListener('pointerup', up);
     el.addEventListener('pointercancel', up);
+    el.addEventListener('lostpointercapture', (e) => this.release(e.pointerId));
     el.addEventListener('pointerleave', () => { this.pointerNdc = null; this.onHover(null, { x: 0, y: 0 }); });
     el.addEventListener('wheel', (e) => {
       e.preventDefault();
@@ -553,6 +564,12 @@ export class Globe {
     }, { passive: false });
     window.addEventListener('resize', () => this.resize());
     document.addEventListener('visibilitychange', () => { if (document.hidden) this.pause(); else this.resumeLoop(); });
+  }
+
+  private release(id: number) {
+    if (!this.pointers.delete(id)) return;
+    if (this.pointers.size === 0) this.dragging = false;
+    this.pinchStart = 0;
   }
 
   nudge(dLon: number, dLat: number) {
@@ -620,6 +637,7 @@ export class Globe {
     const cp = latLonToVec3(this.camLat, this.camLon, this.dist);
     this.camera.position.set(cp[0], cp[1], cp[2]);
     this.camera.lookAt(0, 0, 0);
+    this.camera.updateMatrixWorld(); // so labels projected this frame match what is drawn
 
     // reveal
     this.reveal += (this.revealTarget - this.reveal) * (1 - Math.pow(0.12, dt));
@@ -660,7 +678,7 @@ export class Globe {
     if (avg < 0.037) return; // slower than ~27 fps (a 30 fps cap alone does not trigger this)
     this.stage++;
     if (this.stage === 1) { this.maxDpr = 1.25; this.resize(); }
-    else { this.composer = null; this.maxDpr = 1; this.resize(); }
+    else { this.composer?.dispose(); this.composer = null; this.bloom = null; this.maxDpr = 1; this.resize(); }
   }
 
   private updateArcs(dt: number, t: number, reveal: number) {
