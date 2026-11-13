@@ -74,10 +74,18 @@ Supabase project evktxfawnualbbmoujip (us-east-1)
 
 ## Known limits (accepted, documented)
 
-- Presence keys are the anonymous auth uids and are visible on the public channel; a determined person can link a live light to its echo. Lantern positions are randomised server-side so lanterns cannot be linked that way.
-- Anyone can hold sockets open or spoof gaze/ripple broadcasts from ids that are present; effects are bounded (rate limits per sender, caps on arcs/toasts/feed) but not preventable without a private channel.
-- No captcha on anonymous sign-in. Sybil accounts can inflate warmth/stats within per-uid limits and global breakers.
-- A word blocklist is always bypassable; reports are the backstop.
+From two security reviews. None leaks data or lets anyone put free text in front of others; all are nuisance or fairness limits of an anonymous, account-less design.
+
+- **Presence keys are client-chosen and are the anonymous auth uids.** Anyone on the public channel can see them, can follow one light across a session, and can track a second presence under someone else's key (which may displace that person's shown city among the 418 allowed places). A real fix is a database-backed roster with presence only as a liveness hint.
+- **People are matched by position in a few places** (`syncThreaded`, thread ownership, echo-wave "Wave back"). A fake presence parked on someone's coordinates is treated as that person. Fix: have `my_marks()` return the other party's uid.
+- **Realtime quotas.** Anyone can hold sockets open or burn the message rate; real visitors then see "out of reach". The globe keeps working offline.
+- **Gaze and ripple broadcasts can be spoofed** for ids that are present; bounded (one gaze marker per id; ripples: 15 s per sender, one per 2.5 s and six per 30 s overall).
+- **Waves to me are confirmed against the database** (`my_wavers()`) before a banner or sound, so they cannot be forged by broadcast; third-party wave arcs are decoration only and are budgeted (10 per 10 s).
+- **No captcha on anonymous sign-in** (150 per hour per IP for the demo; put it back to 30 afterwards). Throwaway identities can inflate warmth and stats, close the ring (8 identities), and push against the global ceilings. The ceilings are tiered so first-time visitors still get through.
+- **Echo handles (`eid`)** are public pseudonyms; they rotate after 30 minutes away and `last_seen` is rounded to 10 minutes.
+- **A word blocklist is always bypassable;** reports (three hide a lantern) are the backstop.
+- **No `frame-ancestors`** (cannot be set from a meta tag on GitHub Pages); a framed page could only enter, wave or ripple.
+- **`'self'` in the CSP and `localStorage` are shared with any other site on `jacobnaumann.github.io`.**
 
 ## Decisions
 
