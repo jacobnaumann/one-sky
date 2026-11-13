@@ -1,6 +1,6 @@
 // Renders the social-preview image (public/og.jpg) from the real page.
 import { chromium } from '@playwright/test';
-const browser = await chromium.launch({ args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'] });
+const browser = await chromium.launch({ args: ['--use-angle=d3d11', '--enable-gpu', '--ignore-gpu-blocklist'] });
 const page = await (await browser.newContext({ viewport: { width: 1200, height: 630 }, deviceScaleFactor: 1, timezoneId: 'Europe/Lisbon' })).newPage();
 await page.goto((process.argv[2] ?? 'http://localhost:5173/') + '?hq', { waitUntil: 'domcontentloaded' });
 await page.waitForFunction(() => window.__onesky && !document.getElementById('btn-enter').disabled, null, { timeout: 90000 });

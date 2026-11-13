@@ -52,6 +52,8 @@ export class Sky {
   private me: Me | null = null;
   private tracking = false;
   private handlers: { [K in keyof Events]?: Events[K][] } = {};
+  private goneAt = new Map<string, number>();
+  private goneTimer: ReturnType<typeof setTimeout> | undefined;
   private lastWaveFrom = new Map<string, number>();
   private lastRippleFrom = new Map<string, number>();
   private hiddenChecked = new Map<string, number>();
@@ -151,6 +153,16 @@ export class Sky {
       const since = num(m.since, Date.now());
       next.set(id, { id, lat: m.lat, lon: m.lon, city: place.city, country: place.country, tz: place.tz, since: Math.min(since, Date.now()) });
     }
+    // Presence can flicker (a re-track or a brief reconnect shows as leave-then-join).
+    // Keep someone for a few seconds after they vanish before calling them gone.
+    const now = Date.now();
+    for (const [id, p] of this.people) {
+      if (next.has(id)) { this.goneAt.delete(id); continue; }
+      const t = this.goneAt.get(id) ?? now;
+      this.goneAt.set(id, t);
+      if (now - t < 3500) next.set(id, p); else this.goneAt.delete(id);
+    }
+    if (this.goneAt.size) { clearTimeout(this.goneTimer); this.goneTimer = setTimeout(() => this.syncPeople(), 3600); }
     const joined: Person[] = [], left: Person[] = [];
     for (const [id, p] of next) if (!this.people.has(id)) joined.push(p);
     for (const [id, p] of this.people) if (!next.has(id)) { left.push(p); this.lastWaveFrom.delete(id); this.lastRippleFrom.delete(id); }

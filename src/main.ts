@@ -278,7 +278,9 @@ function renderPersonCard(id: string) {
   const note = h('p', { class: 'note' }, theyWaved ? 'They waved at you. Wave back to tie a thread between you.' : 'If they wave back, a thread of light stays between you.');
   const btn = h('button', { class: 'btn primary', disabled: cooling }, cooling ? 'Wave sent' : theyWaved ? 'Wave back' : 'Wave');
   btn.addEventListener('click', () => { void doWave(p); });
+  const sk = skyState(p.lat, p.lon, new Date());
   card.append(
+    h('div', { class: `skybar sky-${sk.replace(' ', '-')}`, role: 'img', 'aria-label': `Their sky: ${sk}` }),
     h('p', { class: 'eyebrow' }, 'A light, awake right now'),
     h('h2', {}, p.city),
     h('p', { class: 'sub' }, p.country || ' '),

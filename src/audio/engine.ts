@@ -63,7 +63,7 @@ const T60 = 6.908; // ln(1000): time-constant → 60 dB decay time
 
 const MASTER_TRIM = 0.62;
 const WET_LEVEL = 0.55;
-const BED_LEVEL = 0.075;
+const BED_LEVEL = 0.066;
 const BED_FADE_IN = 6;
 
 interface Partial {
@@ -138,7 +138,7 @@ const lonPan = (lon: number): number => (Number.isFinite(lon) ? clamp(lon / 180,
  * Gentle loudness compensation across the lon-mapped range: low sines are weak on laptop
  * speakers, high ones are piercing. D3 → ×1.25, A5 → ×0.70.
  */
-const eq = (midi: number): number => clamp(1.25 - ((midi - 50) / 31) * 0.55, 0.6, 1.25);
+const eq = (midi: number): number => clamp(1.25 - ((midi - 50) / 31) * 0.45, 0.7, 1.25);
 
 type Ctor = new () => AudioContext;
 
@@ -307,12 +307,12 @@ export class AudioEngine {
     const p2 = lonPan(toLon) * 0.6;
     const f1 = midiToHz(n1);
     const f2 = midiToHz(n2);
-    this.note({ hz: f1, at: t, peak: 0.12, attack: 0.008, decay: 1.6, pan: p1, send: 0.5, partials: BELL });
+    this.note({ hz: f1, at: t, peak: 0.13, attack: 0.008, decay: 1.6, pan: p1, send: 0.5, partials: BELL });
     this.note({
       hz: f1, at: t + 0.02, peak: 0.03, attack: travel, decay: 0.5,
       glideTo: f2, glideTime: travel, pan: p1, panTo: p2, panTime: travel, send: 0.9,
     });
-    this.note({ hz: f2, at: t + travel, peak: 0.15, attack: 0.008, decay: 2.8, pan: p2, send: 0.6, partials: BELL });
+    this.note({ hz: f2, at: t + travel, peak: 0.165, attack: 0.008, decay: 2.8, pan: p2, send: 0.6, partials: BELL });
   }
 
   /**
@@ -327,9 +327,9 @@ export class AudioEngine {
     const t = this.now();
     if (t === null) return;
     const pan = lonPan(fromLon) * 0.35;
-    this.note({ hz: midiToHz(69), at: t, peak: 0.25, attack: 0.01, decay: 2.2, pan, send: 0.45, partials: CHIME });
-    this.note({ hz: midiToHz(74), at: t + 0.19, peak: 0.28, attack: 0.01, decay: 3.4, pan, send: 0.5, partials: CHIME });
-    this.note({ hz: midiToHz(62), at: t + 0.19, peak: 0.07, attack: 0.03, decay: 2.4, pan, send: 0.4 });
+    this.note({ hz: midiToHz(69), at: t, peak: 0.23, attack: 0.01, decay: 2.2, pan, send: 0.45, partials: CHIME });
+    this.note({ hz: midiToHz(74), at: t + 0.19, peak: 0.26, attack: 0.01, decay: 3.4, pan, send: 0.5, partials: CHIME });
+    this.note({ hz: midiToHz(62), at: t + 0.19, peak: 0.065, attack: 0.03, decay: 2.4, pan, send: 0.4 });
   }
 
   /**
@@ -350,7 +350,7 @@ export class AudioEngine {
       : d < 0.35 ? [50, 57, 66, 69, 74]
       : d < 0.65 ? [50, 57, 64, 66, 71, 76]
       : [38, 45, 50, 57, 66, 71, 76, 81];
-    const peak = 0.155 / Math.sqrt(notes.length);
+    const peak = 0.145 / Math.sqrt(notes.length);
     const gap = 0.07 + 0.05 * d;
     const width = 0.2 + 0.5 * d;
     notes.forEach((m, i) => {
@@ -373,11 +373,11 @@ export class AudioEngine {
   lantern(): void {
     const t = this.now();
     if (t === null) return;
-    this.noise({ at: t, peak: 0.06, attack: 0.35, decay: 1.1, filter: 'bandpass', freq: 1200, freqTo: 4500, sweep: 0.9, q: 1.2, send: 0.8 });
+    this.noise({ at: t, peak: 0.075, attack: 0.35, decay: 1.1, filter: 'bandpass', freq: 1200, freqTo: 4500, sweep: 0.9, q: 1.2, send: 0.8 });
     const run = [74, 78, 81, 83, 86, 88];
     run.forEach((m, i) => {
       this.note({
-        hz: midiToHz(m), at: t + 0.05 + i * 0.075, peak: 0.1 - i * 0.0075,
+        hz: midiToHz(m), at: t + 0.05 + i * 0.075, peak: 0.11 - i * 0.0085,
         attack: 0.012, decay: 1.5, pan: -0.35 + i * 0.14, send: 0.85,
       });
     });
@@ -469,7 +469,12 @@ export class AudioEngine {
     if (!ctx || !this._started || this.disposed || this._muted || this.hidden) return null;
     if (ctx.state === 'closed') return null;
     const t = ctx.currentTime;
-    return Number.isFinite(t) ? t + LEAD : null;
+    if (!Number.isFinite(t)) return null;
+    // ctx.currentTime as seen from the main thread can be one audio callback behind the
+    // render clock; on outputs with big buffers (Bluetooth, some Android) that is > 30 ms.
+    const base = ctx.baseLatency;
+    const lead = Number.isFinite(base) && base > 0 ? clamp(base + 0.015, LEAD, 0.12) : LEAD;
+    return t + lead;
   }
 
   /**
@@ -484,7 +489,7 @@ export class AudioEngine {
     const dt = t - c.t;
     c.h = dt >= 0 ? c.h * Math.exp(-dt / 0.5) : 0;
     c.t = t;
-    const gain = 1 / Math.sqrt(1 + 0.8 * c.h);
+    const gain = 1 / Math.sqrt(1 + 2 * c.h);
     c.h += 1;
     return gain;
   }
@@ -603,8 +608,8 @@ export class AudioEngine {
       // midi, type, detune cents, amp, LFO period s, LFO depth, pan
       [38, 'sine', 0, 0.3, 43, 0.25, 0],
       [45, 'sine', 0, 0.3, 31, 0.35, 0],
-      [50, 'triangle', -5, 0.3, 23, 0.4, -0.35],
-      [50, 'triangle', 5, 0.3, 29, 0.4, 0.35],
+      [50, 'triangle', -3.5, 0.3, 23, 0.4, -0.7],
+      [50, 'triangle', 3.5, 0.3, 29, 0.4, 0.7],
       [57, 'sine', 3, 0.26, 37, 0.45, 0.15],
       [64, 'sine', 0, 0.14, 53, 0.6, -0.2],
       [66, 'sine', -2, 0.09, 61, 0.8, 0.25],
@@ -769,7 +774,10 @@ export class AudioEngine {
     v.end = at + 0.12;
     for (const p of v.envs) {
       try {
-        p.cancelScheduledValues(at);
+        // cancelAndHold keeps the value where it is even in the middle of a linear attack
+        // ramp; plain cancel (Firefox) is only exact outside one, i.e. after the first few ms.
+        if (typeof p.cancelAndHoldAtTime === 'function') p.cancelAndHoldAtTime(at);
+        else p.cancelScheduledValues(at);
         p.setTargetAtTime(0, at, 0.015); // -60 dB after ~0.1 s
       } catch {
         /* ignore */
@@ -796,12 +804,24 @@ export class AudioEngine {
     }
   }
 
-  /** 0 → peak (95 % after `attack`) → hold → exponential fall. Returns the decay time constant. */
-  private envelope(g: AudioParam, at: number, peak: number, attack: number, hold: number, decay: number): number {
+  /**
+   * 0 → peak → hold → exponential fall. Returns the decay time constant.
+   *
+   * Short attacks (< 0.1 s: every bell, pluck and tick) rise on a linear ramp. Measured in
+   * Chromium: if the render clock is already past an exponential-approach attack when it is
+   * scheduled (main thread a few tens of ms behind the audio thread), that event is skipped
+   * and the whole note stays at gain 0 — a silently missing note. A skipped linear ramp
+   * still lands on its end value, so a late note merely starts late.
+   * Slow swells keep the exponential approach (95 % after `attack`): lateness cannot skip
+   * them, and they can be interrupted smoothly at any point by voice stealing.
+   */
+  private envelope(g: AudioParam, at: number, peak: number, attack: number, hold: number, decay: number, end: number): number {
     const tau = Math.max(0.005, decay / T60);
     g.setValueAtTime(0, at);
-    g.setTargetAtTime(peak, at, attack / 3);
+    if (attack < 0.1) g.linearRampToValueAtTime(peak, at + attack);
+    else g.setTargetAtTime(peak, at, attack / 3);
     g.setTargetAtTime(0, at + attack + hold, tau);
+    g.setValueAtTime(0, end);
     return tau;
   }
 
@@ -867,7 +887,7 @@ export class AudioEngine {
         }
         const g = ctx.createGain();
         g.gain.value = 0;
-        this.envelope(g.gain, s.at, peak * p.level, attack, hold, decay * (p.decay ?? 1));
+        this.envelope(g.gain, s.at, peak * p.level, attack, hold, decay * (p.decay ?? 1), end);
         osc.connect(g);
         g.connect(out);
         osc.start(s.at);
@@ -909,7 +929,7 @@ export class AudioEngine {
       }
       const g = ctx.createGain();
       g.gain.value = 0;
-      this.envelope(g.gain, s.at, peak, attack, hold, decay);
+      this.envelope(g.gain, s.at, peak, attack, hold, decay, end);
       src.connect(f);
       f.connect(g);
       // random offset so repeated ticks are not the identical grain of noise

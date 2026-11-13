@@ -31,10 +31,12 @@ async function pageMain({ scenario, sr, long }) {
   const wall = (ms) => new Promise((r) => setTimeout(r, ms));
   // Waits are measured on the audio clock (a headless audio clock can run a few % off wall time);
   // while the context is suspended they fall back to wall time.
+  const clock = Object.getOwnPropertyDescriptor(BaseAudioContext.prototype, 'currentTime').get;
+  const now = () => clock.call(ctx); // the real audio clock, even when a scenario makes the engine see a stale one
   const sleep = async (ms) => {
-    const end = ctx.currentTime + ms / 1000;
+    const end = now() + ms / 1000;
     const t0 = performance.now();
-    while (ctx.currentTime < end) {
+    while (now() < end) {
       await wall(4);
       if (ctx.state !== 'running' && performance.now() - t0 >= ms) return;
     }
@@ -106,7 +108,7 @@ async function pageMain({ scenario, sr, long }) {
   await sleep(250);
 
   const marks = [];
-  const mark = (label, dur, extra = {}) => marks.push({ label, t: ctx.currentTime, dur, ...extra });
+  const mark = (label, dur, extra = {}) => marks.push({ label, t: now(), dur, ...extra });
   const start = async (bed) => {
     skipStarts = !bed;
     await E.start();
@@ -190,12 +192,44 @@ async function pageMain({ scenario, sr, long }) {
       E.suspend();
       await sleep(2000);
       extra.stateWhileSuspended = ctx.state;
+      extra.baseLatency = ctx.baseLatency;
       E.resume();
       await sleep(3200);
     },
     twinkle1: async () => { await start(false); E.setLights(lights(1)); mark('twinkle 1 light', 40); await sleep(40300); },
     twinkle8: async () => { await start(false); E.setLights(lights(8)); mark('twinkle 8 lights', 40); await sleep(40300); },
     twinkle200: async () => { await start(false); E.setLights(lights(200)); mark('twinkle 200 lights', 40); await sleep(40300); },
+    // Late scheduling: the engine sees a clock that is behind the render clock (what a main
+    // thread behind a large audio callback buffer sees). Every event must still sound.
+    late: async () => {
+      await start(false);
+      await sleep(300);
+      for (const lag of [0.045, 0.08, 0.2]) {
+        Object.defineProperty(ctx, 'currentTime', { get: () => now() - lag, configurable: true });
+        const steps = [
+          ['lightJoined(120)', 2.5, () => E.lightJoined(120)],
+          ['waveIn(10)', 3.5, () => E.waveIn(10)],
+          ['lanternOpen()', 2.5, () => E.lanternOpen()],
+          ['warm()', 2, () => E.warm()],
+          ['ringSegment(5)', 2.5, () => E.ringSegment(5)],
+          ['thread(5000)', 4, () => E.thread(5000)],
+          ['lantern()', 3, () => E.lantern()],
+        ];
+        for (const [label, dur, fn] of steps) { mark(`${Math.round(lag * 1000)} ms late ${label}`, dur); fn(); await sleep(dur * 1000 + 250); }
+        delete ctx.currentTime;
+      }
+    },
+    // Reliability: 60 identical bells (E5, a pitch the bed does not contain), 2 s apart. Every one must sound.
+    drops: async () => {
+      await start(true);
+      await sleep(7000);
+      for (let i = 0; i < 60; i++) { mark(`bell ${i}`, 0.4, { probeHz: 659.2551 }); E.lightJoined(120); await sleep(2000); }
+    },
+    dropsQuiet: async () => {
+      await start(false);
+      await sleep(500);
+      for (let i = 0; i < 20; i++) { mark(`bell ${i}`, 0.4, { probeHz: 659.2551 }); E.lightJoined(120); await sleep(7000); }
+    },
     // Static transfer curve + step response of the engine's own master chain (compressor → trim).
     chain: async () => {
       await start(false);
@@ -237,7 +271,7 @@ async function pageMain({ scenario, sr, long }) {
 
   chunks.sort((a, b) => a.frame - b.frame);
   let gaps = 0;
-  for (let i = 1; i < chunks.length; i++) if (chunks[i].frame !== chunks[i - 1].frame + 4096) { gaps++; (extra.gapInfo ??= []).push([chunks[i - 1].frame - chunks[0].frame, chunks[i].frame - chunks[i - 1].frame, chunks.length]); }
+  for (let i = 1; i < chunks.length; i++) if (i > 1 && chunks[i].frame !== chunks[i - 1].frame + 4096) { gaps++; (extra.gapInfo ??= []).push([chunks[i - 1].frame - chunks[0].frame, chunks[i].frame - chunks[i - 1].frame, chunks.length]); }
   // place every block at its own frame, so a skipped block cannot shift what follows
   const first = chunks.length ? chunks[0].frame : 0;
   const frames = chunks.length ? chunks[chunks.length - 1].frame + 4096 - first : 0;
@@ -400,8 +434,9 @@ function writeWav(path, L, R, sr) {
 
 /* ------------------------------------------------------------------------ run */
 
-const SCENARIOS = ['chain', 'bed', 'arrive', 'lightJoined', 'waveOut', 'waveIn', 'thread', 'lantern', 'ring', 'stress', 'mute', 'twinkle1', 'twinkle8', 'twinkle200'];
-const todo = ONLY ? ONLY.filter((s) => SCENARIOS.includes(s)) : SCENARIOS;
+const OPTIONAL = ['drops', 'dropsQuiet']; // only with --only=
+const SCENARIOS = ['chain', 'bed', 'arrive', 'lightJoined', 'waveOut', 'waveIn', 'thread', 'lantern', 'ring', 'late', 'stress', 'mute', 'twinkle1', 'twinkle8', 'twinkle200'];
+const todo = ONLY ? ONLY.filter((s) => SCENARIOS.includes(s) || OPTIONAL.includes(s)) : SCENARIOS;
 mkdirSync(OUT, { recursive: true });
 
 const browser = await chromium.launch({ args: ['--autoplay-policy=no-user-gesture-required'] });
@@ -452,6 +487,22 @@ for (const r of results) {
   if (r.error) { console.log(r.error); bad(`${r.name}: failed to run`); continue; }
   if (r.gaps && r.name === 'mute') console.log(`  (${r.gaps} discontinuity in the frame counter: the suspend)`);
   else if (r.gaps) console.log("  gapInfo " + JSON.stringify(r.extra.gapInfo)), bad(`${r.name}: recorder dropped ${r.gaps} block(s)`);
+  if (r.name.startsWith('drops')) {
+    // amplitude of the bell's fundamental in the 0.4 s after each call (Goertzel on the mono mix)
+    const amps = r.segs.map((sg) => {
+      const w = (2 * Math.PI * sg.probeHz) / r.sr;
+      let re = 0, im = 0;
+      const n = sg.b - sg.a;
+      for (let i = 0; i < n; i++) { const x = 0.5 * (r.L[sg.a + i] + r.R[sg.a + i]); re += x * Math.cos(w * i); im -= x * Math.sin(w * i); }
+      return (2 * Math.hypot(re, im)) / n;
+    });
+    const sorted = [...amps].sort((a, b) => a - b);
+    const med = sorted[sorted.length >> 1];
+    const missing = amps.map((a, i) => (a < med * 0.25 ? i : -1)).filter((i) => i >= 0);
+    console.log(`  ${amps.length} bells; fundamental level median ${f1(dB(med))} dBFS, min ${f1(dB(sorted[0]))}, max ${f1(dB(sorted[sorted.length - 1]))}; missing: ${missing.length ? missing.join(',') : 'none'}`);
+    if (missing.length) bad(`${r.name}: ${missing.length} of ${amps.length} bells did not sound (#${missing.join(',')})`);
+    continue;
+  }
   if (r.name === 'chain') {
     console.log('master chain (compressor -> trim), 440 Hz sine straight into the compressor:');
     for (const s of r.segs.filter((x) => x.label.startsWith('sine'))) {
@@ -473,6 +524,7 @@ for (const r of results) {
   for (const s of r.segs) {
     console.log(row([s.label, f1(s.peakDb), f1(s.rmsDb), f1(s.winMaxDb), f1(s.winMinDb), s.dc.toFixed(5), s.clipped, s.to50.toFixed(1), s.maxJump.toFixed(5), Math.round(s.jumpAsHz), s.clickRatio.toFixed(1)], W));
     if (s.spec) console.log(`    spectrum: ${peaksText(s.spec)}\n    energy <60 Hz ${(s.spec.lt60 * 100).toFixed(2)} %, <120 Hz ${(s.spec.lt120 * 100).toFixed(1)} %`);
+    if (!s.pre && s.peakDb < -60 && !s.label.startsWith('muted')) bad(`${r.name}/${s.label}: produced no sound (peak ${f1(s.peakDb)} dBFS)`);
     if (s.clipped) bad(`${r.name}/${s.label}: ${s.clipped} sample(s) >= 1.0`);
     if (s.peakDb > -3) bad(`${r.name}/${s.label}: peak ${f1(s.peakDb)} dBFS > -3`);
     if (s.dc > 0.002) bad(`${r.name}/${s.label}: DC ${s.dc.toFixed(4)}`);
@@ -496,7 +548,7 @@ for (const r of results) {
   if (r.name === 'mute') {
     const m = r.segs.find((s) => s.label.startsWith('muted'));
     if (m && m.peakDb > -80) bad(`not silent when muted: peak ${f1(m.peakDb)} dBFS`);
-    console.log(`    context state while suspended: ${r.extra.stateWhileSuspended}`);
+    console.log(`    context state while suspended: ${r.extra.stateWhileSuspended}; baseLatency ${r.extra.baseLatency}`);
   }
   if (r.name.startsWith('twinkle')) {
     const s = r.segs[0];
@@ -516,7 +568,7 @@ const bedRms = by.bed?.steady?.rmsDb;
 if (bedRms !== undefined) {
   console.log(`\n=== events against the bed (bed steady RMS ${f1(bedRms)} dBFS) ===`);
   for (const r of results) {
-    if (r.error || ['bed', 'chain', 'mute', 'stress'].includes(r.name)) continue;
+    if (r.error || ['bed', 'chain', 'mute', 'stress', 'late'].includes(r.name) || r.name.startsWith('drops')) continue;
     for (const s of r.segs) {
       const over = s.winMaxDb - bedRms;
       console.log(`  ${s.label.padEnd(26)} peak ${f1(s.peakDb).padStart(6)}  loudest 100 ms ${f1(s.winMaxDb).padStart(6)}  = bed ${over >= 0 ? '+' : ''}${f1(over)} dB   audible ≈ ${s.to50.toFixed(1)} s`);
@@ -527,6 +579,7 @@ if (bedRms !== undefined) {
 console.log(`\n=== verdict ===`);
 if (problems.length) { for (const p of problems) console.log('  FAIL ' + p); } else console.log('  no hard limit broken');
 
+mkdirSync(OUT, { recursive: true });
 const strip = (r) => { const { L, R, ...rest } = r; return { ...rest, segs: rest.segs?.map(({ win, specAll, ...s }) => s) }; };
 writeFileSync(`${OUT}/report.json`, JSON.stringify({ when: new Date().toISOString(), problems, results: results.map(strip) }, null, 1));
 console.log(`\nreport: ${OUT}/report.json${WAV ? `, recordings: ${OUT}/*.wav` : ''}`);
