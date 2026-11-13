@@ -114,6 +114,7 @@ function cleanup(uids) {
            km_total = greatest(0, km_total - coalesce((select sum(km) from d), 0))
      where id;
     delete from public.echoes where uid in (${list});
+    delete from public.echo_waves where from_uid in (${list}) or to_uid in (${list});
     delete from public.zone_days where uid in (${list});
     delete from public.rate_events where uid in (${list});
     commit;
@@ -245,6 +246,12 @@ async function main() {
     check('no session: send_wave refused', !!r.error && /not_authenticated/.test(r.error.message), msg(r));
     r = await anon.rpc('warm_lantern', { p_id: ZERO_ID });
     check('no session: warm_lantern refused', !!r.error && /not_authenticated/.test(r.error.message), msg(r));
+    r = await anon.rpc('wave_echo', { p_eid: ZERO_ID, p_lat: A_POS.lat, p_lon: A_POS.lon, p_tz: A_POS.tz });
+    check('no session: wave_echo refused', !!r.error && /not_authenticated/.test(r.error.message), msg(r));
+    r = await anon.rpc('collect_echo_waves');
+    check('no session: collect_echo_waves refused', !!r.error && /not_authenticated/.test(r.error.message), msg(r));
+    r = await anon.from('echo_waves').select('id').limit(1);
+    check('no session: cannot read echo_waves', !!r.error, msg(r));
     r = await anon.rpc('report_lantern', { p_id: ZERO_ID });
     check('no session: report_lantern refused', !!r.error && /not_authenticated/.test(r.error.message), msg(r));
     r = await anon.from('lanterns').insert({ day: today(), question_id: 0, body: '[test] direct', lat: 0, lon: 0, place: '[test] X', tz: 'Etc/UTC' });
@@ -256,8 +263,10 @@ async function main() {
     check('no session: cannot read places / limits', !!r.error && !!r2.error, `${msg(r)} | ${msg(r2)}`);
     r = await anon.from('lanterns').select('id, body, place, seeded');
     check('no session: can read seeded lanterns', !r.error && r.data.filter((l) => l.seeded).length === 6, msg(r));
-    check('seeded lanterns are labelled as from One Sky',
-      !r.error && r.data.filter((l) => l.seeded).every((l) => l.body.startsWith('From One Sky:') && l.place !== 'One Sky'));
+    // Since 20261113060000_seed_copy the body has no "From One Sky:" prefix: the client card labels
+    // a seeded lantern from its `seeded` flag.
+    check('seeded lanterns carry a real place and no redundant "From One Sky:" prefix',
+      !r.error && r.data.filter((l) => l.seeded).every((l) => l.body.length > 0 && !l.body.startsWith('From One Sky:') && l.place !== 'One Sky'));
   }
 
   // ── signed in: no direct writes, no private reads ─────────────────────────
@@ -274,15 +283,16 @@ async function main() {
       world_totals: { id: true, threads_total: 999, km_total: 999 },
       places: { tz: 'Test/Nowhere', city: '[test] X', country: 'X', lat: 0, lon: 0 },
       limits: { key: 'x', value: 1, def: 1 },
+      echo_waves: { to_uid: uidB, from_uid: uidA, from_place: '[test] X', from_tz: 'Etc/UTC', from_lat: 0, from_lon: 0 },
     };
     const patch = {
       lanterns: { warmth: 999 }, warmths: { uid: uidB }, reports: { uid: uidB }, waves: { place: 'x' },
       threads: { km: 999 }, echoes: { place: 'x' }, zone_days: { place: 'x' }, rate_events: { kind: 'y' },
-      world_totals: { threads_total: 999 }, places: { city: 'x' }, limits: { value: 999999 },
+      world_totals: { threads_total: 999 }, places: { city: 'x' }, limits: { value: 999999 }, echo_waves: { from_place: 'x' },
     };
     const anyCol = {
       lanterns: 'id', warmths: 'lantern_id', reports: 'lantern_id', waves: 'id', threads: 'id',
-      echoes: 'uid', zone_days: 'zone', rate_events: 'uid', world_totals: 'id', places: 'tz', limits: 'key',
+      echoes: 'uid', zone_days: 'zone', rate_events: 'uid', world_totals: 'id', places: 'tz', limits: 'key', echo_waves: 'id',
     };
     for (const t of Object.keys(rows)) {
       const ins = await A.from(t).insert(rows[t]);
@@ -291,7 +301,7 @@ async function main() {
       check(`signed in: insert/update/delete on ${t} refused`, !!ins.error && !!upd.error && !!del.error,
         `insert: ${msg(ins)} | update: ${msg(upd)} | delete: ${msg(del)}`);
     }
-    for (const t of ['waves', 'reports', 'rate_events', 'echoes', 'world_totals', 'places', 'limits']) {
+    for (const t of ['waves', 'reports', 'rate_events', 'echoes', 'world_totals', 'places', 'limits', 'echo_waves']) {
       const r = await A.from(t).select('*').limit(1);
       check(`signed in: cannot read ${t}`, !!r.error, msg(r));
     }
@@ -391,12 +401,16 @@ async function main() {
       insert into public.threads (a_uid, b_uid, a_lat, a_lon, a_place, b_lat, b_lon, b_place, km, created_at) values
         ('${u}', '${v}', 0, 0, 'x', 1, 1, 'y', 1, now() - interval '15 days'),
         ('${u}', '${v}', 0, 0, 'x', 1, 1, 'y', 1, now() - interval '13 days');
+      insert into public.echo_waves (to_uid, from_uid, from_place, from_tz, from_lat, from_lon, created_at) values
+        ('${u}', '${v}', 'x', 'Etc/UTC', 0, 0, now() - interval '8 days'),
+        ('${v}', '${u}', 'x', 'Etc/UTC', 0, 0, now() - interval '6 days');
       select public._prune();
       select (select string_agg(kind, ',' order by kind) from public.rate_events where uid = '${u}') as kinds,
              (select count(*) from public.waves where from_uid = '${u}') as waves,
-             (select count(*) from public.threads where a_uid = '${u}') as threads;`);
+             (select count(*) from public.threads where a_uid = '${u}') as threads,
+             (select count(*) from public.echo_waves where to_uid in ('${u}', '${v}')) as echo_waves;`);
     check('_prune keeps what each limiter still needs and drops the rest',
-      p.kinds === 'check_in,lantern,report,warm,wave' && p.waves === '1' && p.threads === '1', JSON.stringify(p));
+      p.kinds === 'check_in,lantern,report,warm,wave' && p.waves === '1' && p.threads === '1' && p.echo_waves === '1', JSON.stringify(p));
   }
 
   const stats0 = (await A.rpc('world_stats')).data;
@@ -748,9 +762,84 @@ async function main() {
     check('world_stats is readable without a session', !anonStats.error && Array.isArray(anonStats.data.zones_today), msg(anonStats));
     const e = await B.rpc('recent_echoes');
     const row = e.data?.find((x) => x.place === A_POS.city && near(x.lat, A_POS.lat, 0.001) && near(x.lon, A_POS.lon, 0.001));
-    check('recent_echoes returns the echo without a uid',
-      !e.error && !!row && !('uid' in row) && Object.keys(row).sort().join(',') === 'last_seen,lat,lon,place', msg(e));
+    check('recent_echoes returns the echo with an eid and without a uid',
+      !e.error && !!row && !('uid' in row) && Object.keys(row).sort().join(',') === 'eid,last_seen,lat,lon,place' &&
+      /^[0-9a-f-]{36}$/.test(row.eid) && !uids.includes(row.eid), msg(e));
     check('recent_echoes carries no client-supplied place text', !e.error && !e.data.some((x) => x.place === FORGED));
+    const anonEchoes = await anon.rpc('recent_echoes');
+    check('recent_echoes is readable without a session', !anonEchoes.error && anonEchoes.data.some((x) => x.eid === row?.eid), msg(anonEchoes));
+  }
+
+  // ── wave_echo / collect_echo_waves ────────────────────────────────────────
+  {
+    const eids = Object.fromEntries(sqlRows(`select uid, eid from public.echoes where uid in (${list})`).map((r) => [r.uid, r.eid]));
+    const eA = await A.rpc('recent_echoes');
+    const eB = await B.rpc('recent_echoes');
+    check('recent_echoes: user A appears as an echo to B, by eid',
+      !eB.error && !!eids[uidA] && eB.data.some((x) => x.eid === eids[uidA] && x.place === A_POS.city), msg(eB));
+    check('recent_echoes excludes the caller own echo',
+      !eA.error && !eB.error && !!eids[uidB] && !eA.data.some((x) => x.eid === eids[uidA]) && !eB.data.some((x) => x.eid === eids[uidB]) &&
+      eA.data.some((x) => x.eid === eids[uidB]), `${msg(eA)} | ${msg(eB)}`);
+
+    const we = (c, eid, pos, over = {}) => c.rpc('wave_echo', { p_eid: eid, p_lat: pos.lat, p_lon: pos.lon, p_tz: pos.tz, ...over });
+    const bad = [
+      await we(B, eids[uidA], B_POS, { p_tz: 'Etc/UTC' }),
+      await we(B, eids[uidA], B_POS, { p_tz: null }),
+      await we(B, eids[uidA], B_POS, { p_lat: B_POS.lat + 0.7 }),
+      await we(B, eids[uidA], A_POS, { p_tz: B_POS.tz }),
+    ];
+    check('wave_echo rejects an unknown or missing zone and a position outside the place',
+      bad.every((r) => r.error?.message === 'invalid_input'), bad.map(msg).join(' | '));
+    const own = await we(B, eids[uidB], B_POS);
+    check('wave_echo to your own echo is refused', !!own.error && own.error.message === 'invalid_target', msg(own));
+    const unknown = await we(B, ZERO_ID, B_POS);
+    check('wave_echo to an unknown eid raises not_found', !!unknown.error && unknown.error.message === 'not_found', msg(unknown));
+    const byUid = await we(B, uidA, B_POS);
+    check('wave_echo does not accept a uid in place of an eid', !!byUid.error && byUid.error.message === 'not_found', msg(byUid));
+    const [spent0] = sqlRows(`select count(*) as n from public.rate_events where uid = '${uidB}' and kind = 'echo_wave'`);
+    check('wave_echo spends no budget on a refused call', spent0.n === '0', JSON.stringify(spent0));
+
+    const ok1 = await we(B, eids[uidA], B_POS);
+    check('wave_echo from B to the echo of A returns ok', !ok1.error && ok1.data?.ok === true && Object.keys(ok1.data).join(',') === 'ok', msg(ok1));
+    const ok2 = await we(B, eids[uidA], B_POS);
+    const [pend] = sqlRows(`select count(*) as n, min(from_place) as place from public.echo_waves where to_uid = '${uidA}'`);
+    check('wave_echo twice from the same sender keeps one pending row, with places.city',
+      !ok2.error && pend.n === '1' && pend.place === B_POS.city, `${msg(ok2)} ${JSON.stringify(pend)}`);
+
+    sql(`update public.limits set value = 0 where key = 'echo_wave_per_hour';`);
+    const limited = await we(C, eids[uidA], C_POS);
+    sql(`update public.limits set value = def where key = 'echo_wave_per_hour';`);
+    check('wave_echo: over the hourly budget raises rate_limited', !!limited.error && limited.error.message === 'rate_limited', msg(limited));
+
+    const none = await B.rpc('collect_echo_waves');
+    check('collect_echo_waves for someone with nothing pending returns []', !none.error && Array.isArray(none.data) && none.data.length === 0, msg(none));
+    const got = await A.rpc('collect_echo_waves');
+    const w = got.data?.[0];
+    check('collect_echo_waves returns the one wave with the canonical place of the sender',
+      !got.error && Array.isArray(got.data) && got.data.length === 1 && w.place === B_POS.city && w.tz === B_POS.tz &&
+      near(w.lat, B_POS.lat, 0.001) && near(w.lon, B_POS.lon, 0.001) && !Number.isNaN(Date.parse(w.created_at)), msg(got));
+    check('collect_echo_waves item has exactly place, tz, lat, lon, created_at (no uid)',
+      !!w && Object.keys(w).sort().join(',') === 'created_at,lat,lon,place,tz', JSON.stringify(w));
+    const again = await A.rpc('collect_echo_waves');
+    const [leftover] = sqlRows(`select count(*) as n from public.echo_waves where to_uid = '${uidA}'`);
+    check('collect_echo_waves delivers once: the second call returns []',
+      !again.error && Array.isArray(again.data) && again.data.length === 0 && leftover.n === '0', `${msg(again)} ${JSON.stringify(leftover)}`);
+
+    // Cap: 40 pending per recipient; the 41st sender is accepted but not stored. Stale rows are
+    // deleted on collect without being returned, and at most 20 come back.
+    sql(`insert into public.echo_waves (to_uid, from_uid, from_place, from_tz, from_lat, from_lon, created_at)
+         select '${uidA}', gen_random_uuid(), 'x' || g, 'Etc/UTC', 0, 0,
+                now() - case when g <= 5 then interval '8 days' else g * interval '1 minute' end
+           from generate_series(1, 40) g;`);
+    const capped = await we(C, eids[uidA], C_POS);
+    const [cap] = sqlRows(`select count(*) as n, count(*) filter (where from_uid = '${uidC}') as mine from public.echo_waves where to_uid = '${uidA}'`);
+    check('wave_echo: past 40 pending the call succeeds but nothing is stored',
+      !capped.error && capped.data?.ok === true && cap.n === '40' && cap.mine === '0', `${msg(capped)} ${JSON.stringify(cap)}`);
+    const many = await A.rpc('collect_echo_waves');
+    const [after] = sqlRows(`select count(*) as n from public.echo_waves where to_uid = '${uidA}'`);
+    check('collect_echo_waves returns the newest 20 of the last 7 days and deletes everything',
+      !many.error && many.data.length === 20 && many.data[0].place === 'x6' && many.data[19].place === 'x25' && after.n === '0',
+      `${msg(many)} ${JSON.stringify(after)}`);
   }
 
   await A.removeAllChannels();
@@ -778,6 +867,7 @@ async function main() {
            + (select count(*) from public.waves where from_uid in (${list}) or to_uid in (${list}))
            + (select count(*) from public.threads where a_uid in (${list}) or b_uid in (${list}))
            + (select count(*) from public.echoes where uid in (${list}))
+           + (select count(*) from public.echo_waves where from_uid in (${list}) or to_uid in (${list}))
            + (select count(*) from public.zone_days where uid in (${list}))
            + (select count(*) from public.rate_events where uid in (${list})) as residue,
              (select count(*) from public.limits where value <> def) as limits_changed`);

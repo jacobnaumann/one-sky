@@ -4,7 +4,7 @@
 //   node scripts/reset-world.mjs --yes  print the counts, wipe, print the counts again
 //
 // Deleted: every non-seeded lantern (with its warmths and reports), all threads, waves, echoes,
-// zone_days and rate_events. Reset: world_totals to zero; warmth and reports on the seeded welcome
+// echo_waves, zone_days and rate_events. Reset: world_totals to zero; warmth and reports on the seeded welcome
 // lanterns to zero; limits to their defaults. Kept: the seeded lanterns, places, auth users.
 //
 // Needs the Supabase CLI, logged in and linked to the project (`supabase db query --linked`).
@@ -44,6 +44,7 @@ const COUNTS = `
     (select count(*) from public.threads)      as threads,
     (select count(*) from public.waves)        as waves,
     (select count(*) from public.echoes)       as echoes,
+    (select count(*) from public.echo_waves)   as echo_waves,
     (select count(*) from public.zone_days)    as zone_days,
     (select count(*) from public.rate_events)  as rate_events,
     (select threads_total from public.world_totals) as threads_total,
@@ -81,6 +82,7 @@ sql(`
   delete from public.threads;
   delete from public.waves;
   delete from public.echoes;
+  delete from public.echo_waves;
   delete from public.zone_days;
   delete from public.rate_events;
   update public.world_totals set threads_total = 0, km_total = 0 where id;
@@ -92,7 +94,7 @@ const after = counts();
 show('\nAfter:', after);
 
 const mustBeZero = ['lanterns_visitor', 'seeded_warmth', 'seeded_reports', 'warmths', 'reports', 'threads', 'waves',
-  'echoes', 'zone_days', 'rate_events', 'threads_total', 'km_total', 'limits_changed'];
+  'echoes', 'echo_waves', 'zone_days', 'rate_events', 'threads_total', 'km_total', 'limits_changed'];
 const left = mustBeZero.filter((k) => after[k] !== '0');
 // A visitor with the page open can check in between the wipe and the recount; that is not a failure
 // of the wipe, but it is reported.

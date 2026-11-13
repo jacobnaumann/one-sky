@@ -427,3 +427,11 @@ body:has(.scrim) :is(.ask, .you, .world, .tools) { opacity: 0; pointer-events: n
   .you { align-items: center; row-gap: 0; }
   .toast { flex-wrap: wrap; }
 }
+
+@media (min-width: 1001px) and (max-width: 1320px) {
+  .ask { width: min(560px, calc(100vw - 740px)); min-width: 300px; }
+  .ask-q { font-size: 22px; }
+  .world { width: 300px; }
+  .stats { gap: 16px; }
+  .ask-actions { flex-wrap: wrap; }
+}
