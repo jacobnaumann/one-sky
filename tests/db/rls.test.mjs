@@ -102,7 +102,7 @@ function cleanup(uids) {
     update public.limits set value = def where value <> def;
     delete from public.lanterns where uid in (${list}) or (body like '[test]%' and not seeded);
     delete from public.warmths where uid in (${list});
-    delete from public.reports where uid in (${list});
+    delete from public.reports where uid in (${list}) or uid = '${GHOST}';
     delete from public.waves where from_uid in (${list}) or to_uid in (${list});
     with d as (
       delete from public.threads
@@ -198,6 +198,7 @@ const A_POS = { lat: 64.15, lon: -21.94, tz: 'Atlantic/Reykjavik', city: 'Reykja
 const B_POS = { lat: -1.29, lon: 36.82, tz: 'Africa/Nairobi', city: 'Nairobi' };
 const C_POS = { lat: 35.9, lon: 139.5, tz: 'Asia/Tokyo', city: 'Tokyo' };
 const ZERO_ID = '00000000-0000-0000-0000-000000000000';
+const GHOST = '11111111-2222-4333-8444-777777777777'; // a reporter that is nobody; rows are cleaned up
 const near = (a, b, eps) => Math.abs(a - b) <= eps;
 
 async function main() {
@@ -218,6 +219,7 @@ async function main() {
   const [uidA, uidB, uidC] = users.map((u) => u.session.user.id);
   const uids = [uidA, uidB, uidC];
   const list = uids.map((u) => `'${u}'`).join(',');
+  const allUids = [...uids]; // plus the fresh user D, once it exists; used for cleanup
   console.log(`sessions: ${users.filter((u) => u.reused).length} reused, ${users.filter((u) => !u.reused).length} new`);
   check('anonymous sign-in gives three distinct anonymous users',
     new Set(uids).size === 3 && users.every((u) => u.session.user.is_anonymous === true));
@@ -227,10 +229,13 @@ async function main() {
   const anon = newClient(); // no session at all
 
   // ── auth configuration ────────────────────────────────────────────────────
+  // The fresh user (D) is also the "identity that has done nothing today" for the breaker tests.
+  const D = newClient();
+  let uidD = ZERO_ID;
   {
-    const fresh = newClient();
-    const r = await fresh.auth.signInAnonymously();
+    const r = await D.auth.signInAnonymously();
     check('auth: a fresh anonymous sign-in still works', !r.error && r.data?.user?.is_anonymous === true, r.error?.message);
+    if (r.data?.user?.id) { uidD = r.data.user.id; allUids.push(uidD); }
     const e = await newClient().auth.signUp({ email: `onesky-test-${Date.now()}@example.com`, password: `pw-${Date.now()}-Aa1!` });
     check('auth: e-mail sign-up is disabled', !!e.error && !e.data?.user, e.error ? `${e.error.code} ${e.error.message}` : 'sign-up was accepted');
   }
@@ -252,6 +257,8 @@ async function main() {
     check('no session: collect_echo_waves refused', !!r.error && /not_authenticated/.test(r.error.message), msg(r));
     r = await anon.from('echo_waves').select('id').limit(1);
     check('no session: cannot read echo_waves', !!r.error, msg(r));
+    r = await anon.rpc('my_wavers');
+    check('no session: my_wavers returns []', !r.error && Array.isArray(r.data) && r.data.length === 0, msg(r));
     r = await anon.rpc('report_lantern', { p_id: ZERO_ID });
     check('no session: report_lantern refused', !!r.error && /not_authenticated/.test(r.error.message), msg(r));
     r = await anon.from('lanterns').insert({ day: today(), question_id: 0, body: '[test] direct', lat: 0, lon: 0, place: '[test] X', tz: 'Etc/UTC' });
@@ -404,13 +411,24 @@ async function main() {
       insert into public.echo_waves (to_uid, from_uid, from_place, from_tz, from_lat, from_lon, created_at) values
         ('${u}', '${v}', 'x', 'Etc/UTC', 0, 0, now() - interval '8 days'),
         ('${v}', '${u}', 'x', 'Etc/UTC', 0, 0, now() - interval '6 days');
+      insert into public.lanterns (uid, day, question_id, body, lat, lon, place, tz, reports, seeded, created_at)
+        select '${u}', public._utc_day(), 0, '[test] prune ' || chr(96 + g), 0, 0, 'x', 'Etc/UTC',
+               case when g = 8 then 2 else 3 end, g = 9,
+               now() - case when g = 10 then interval '50 hours' else interval '47 hours' - g * interval '1 minute' end
+          from generate_series(1, 10) g;
       select public._prune();
       select (select string_agg(kind, ',' order by kind) from public.rate_events where uid = '${u}') as kinds,
              (select count(*) from public.waves where from_uid = '${u}') as waves,
              (select count(*) from public.threads where a_uid = '${u}') as threads,
-             (select count(*) from public.echo_waves where to_uid in ('${u}', '${v}')) as echo_waves;`);
+             (select count(*) from public.echo_waves where to_uid in ('${u}', '${v}')) as echo_waves,
+             (select string_agg(right(body, 1), '' order by created_at) from public.lanterns
+               where uid = '${u}' and hidden and hidden_at is not null) as caught_up,
+             (select count(*) from public.lanterns where uid = '${u}' and hidden <> (hidden_at is not null)) as half_hidden;`);
     check('_prune keeps what each limiter still needs and drops the rest',
       p.kinds === 'check_in,lantern,report,warm,wave' && p.waves === '1' && p.threads === '1' && p.echo_waves === '1', JSON.stringify(p));
+    // Rows a-g have three reports (oldest first), h has two, i is seeded, j is past its 48 hours.
+    check('_prune catch-up hides at most 5 lanterns with three reports per run, oldest first, never seeded ones',
+      p.caught_up === 'abcde' && p.half_hidden === '0', JSON.stringify(p));
   }
 
   const stats0 = (await A.rpc('world_stats')).data;
@@ -506,14 +524,41 @@ async function main() {
       !!ev && !('uid' in ev.new) && !('reports' in ev.new) && !('hidden' in ev.new) && !('hidden_at' in ev.new), ev ? Object.keys(ev.new).join(',') : 'no event');
   }
 
+  const made = []; // lanterns released in the acceptance rounds: { who: 0 | 1 | 2, ...lantern }
   // Global ceiling, then text that must be accepted. The per-uid lantern budget (1 per 30 s,
   // 5 per day) is cleared between rounds so this does not take minutes.
   {
     sql(`update public.limits set value = 0 where key = 'lanterns_global_hour';
          delete from public.rate_events where kind = 'lantern' and uid in (${list});`);
     const r = await A.rpc('release_lantern', { ...base, p_body: '[test] over the ceiling' });
-    check('release_lantern: global hourly ceiling raises rate_limited', !!r.error && r.error.message === 'rate_limited', msg(r));
-    sql(`update public.limits set value = def where key = 'lanterns_global_hour';`);
+    const r0 = await C.rpc('release_lantern', lanternArgs(C_POS, '[test] over the ceiling, first today'));
+    check('release_lantern: a global ceiling of 0 raises sky_busy, even for a first lantern of the day',
+      r.error?.message === 'sky_busy' && r0.error?.message === 'sky_busy', `${msg(r)} | ${msg(r0)}`);
+
+    // Reserve: with the ceiling at exactly the number of lanterns in the last hour, a uid that has
+    // released today is refused and a uid's first lantern of the day is taken.
+    const atCeiling = `update public.limits set value = (select count(*) from public.lanterns where created_at > now() - interval '1 hour') where key = 'lanterns_global_hour';`;
+    const clearBudget = `delete from public.rate_events where kind = 'lantern' and uid in (${list}, '${uidD}');`;
+    sql(atCeiling);
+    const busyA = await A.rpc('release_lantern', { ...base, p_body: '[test] at the ceiling' });
+    const firstC = await C.rpc('release_lantern', lanternArgs(C_POS, '[test] first of the day'));
+    sql(clearBudget + atCeiling);
+    const secondC = await C.rpc('release_lantern', lanternArgs(C_POS, '[test] second of the day'));
+    check('release_lantern: at the global ceiling a uid that released today gets sky_busy',
+      busyA.error?.message === 'sky_busy' && secondC.error?.message === 'sky_busy', `${msg(busyA)} | ${msg(secondC)}`);
+    check('release_lantern: at the global ceiling a first lantern of the UTC day is still taken',
+      !firstC.error && firstC.data?.body === '[test] first of the day', msg(firstC));
+    // Hard ceiling at twice the limit: three or more lanterns in the last hour, limit floor(n / 2).
+    sql(`update public.limits set value = (select count(*) / 2 from public.lanterns where created_at > now() - interval '1 hour') where key = 'lanterns_global_hour';`);
+    const hardD = await D.rpc('release_lantern', lanternArgs(B_POS, '[test] past twice the ceiling'));
+    check('release_lantern: at twice the global ceiling even a first lantern of the day gets sky_busy',
+      hardD.error?.message === 'sky_busy', msg(hardD));
+    // The caller's own limit still says rate_limited, and is checked first.
+    sql(clearBudget + `update public.limits set value = 0 where key = 'lanterns_global_hour';
+         insert into public.rate_events (uid, kind) values ('${uidA}', 'lantern');`);
+    const own = await A.rpc('release_lantern', { ...base, p_body: '[test] too soon, busy sky' });
+    check('release_lantern: the per-uid limit still raises rate_limited', own.error?.message === 'rate_limited', msg(own));
+    sql(clearBudget + `update public.limits set value = def where key = 'lanterns_global_hour';`);
 
     const accepts = [
       ['words that only look rude', '[test] Scunthorpe assess classic cocktail Dickens Essex shiitake Hancock night snigger'],
@@ -525,7 +570,6 @@ async function main() {
       ['accented Latin', '[test] Café déjà vu à Zürich, mañana Việt Nam, café'],
       ['Persian with ZWNJ', '[test] می‌خواهم'],
     ];
-    const made = [];
     for (let i = 0; i < accepts.length; i += 3) {
       if (i > 0) sql(`delete from public.rate_events where kind = 'lantern' and uid in (${list});`);
       const round = accepts.slice(i, i + 3);
@@ -572,7 +616,7 @@ async function main() {
   {
     const r1 = await A.rpc('report_lantern', { p_id: L2.id });
     const r1b = await A.rpc('report_lantern', { p_id: L2.id }); // same user twice counts once
-    const r2 = await B.rpc('report_lantern', { p_id: L2.id });
+    const r2 = await D.rpc('report_lantern', { p_id: L2.id }); // not B: L2 is B's own, which would not count
     const still = await C.from('lanterns').select('id').eq('id', L2.id);
     check('two distinct reports do not hide a lantern', !r1.error && !r1b.error && !r2.error && still.data?.length === 1, `${msg(r1)} | ${msg(r2)} | ${msg(still)}`);
     const r3 = await C.rpc('report_lantern', { p_id: L2.id });
@@ -607,23 +651,58 @@ async function main() {
       !n1.error && !n2.error && !n3.error && spent.reports === '1' && spent.seeded_reports === '0', JSON.stringify(spent));
     check('warm_lantern spends no budget on an unknown lantern or a repeat', spent.warms_a === '0' && spent.warms_b === '1', JSON.stringify(spent));
     check('auto-hide stamps hidden_at', spent.l2_hidden_at === 'true', JSON.stringify(spent));
-    const over = await A.rpc('report_lantern', { p_id: L1.id });
-    check('report_lantern: sixth report in 24 hours raises rate_limited', !!over.error && over.error.message === 'rate_limited', msg(over));
+    const fromB = made.find((l) => l.who === 1);
+    const over = await A.rpc('report_lantern', { p_id: fromB?.id ?? ZERO_ID });
+    check('report_lantern: sixth report in 24 hours raises rate_limited', !!fromB && !!over.error && over.error.message === 'rate_limited', msg(over));
 
     // Breaker: with the hourly auto-hide ceiling reached, three reports are recorded but hide nothing.
+    // L1 is A's own lantern: A's report is a silent no-op, so the third reporter is a made-up uid.
     sql(`update public.limits set value = 0 where key = 'autohide_per_hour';
-         delete from public.rate_events where kind = 'report' and uid = '${uidA}';`);
+         delete from public.rate_events where kind = 'report' and uid = '${uidA}';
+         insert into public.reports (lantern_id, uid) values ('${L1.id}', '${GHOST}');
+         update public.lanterns set reports = 1 where id = '${L1.id}';`);
     const rr = [];
     for (const c of [A, B, C]) rr.push(await c.rpc('report_lantern', { p_id: L1.id }));
     const vis = await A.from('lanterns').select('id').eq('id', L1.id);
     const [st] = sqlRows(`
-      update public.limits set value = def where key = 'autohide_per_hour';
       select reports, hidden, hidden_at is null as no_stamp,
-             (select count(*) from public.reports where lantern_id = '${L1.id}') as report_rows
+             (select count(*) from public.reports where lantern_id = '${L1.id}') as report_rows,
+             (select count(*) from public.reports where lantern_id = '${L1.id}' and uid = '${uidA}') as own_rows,
+             (select count(*) from public.rate_events where uid = '${uidA}' and kind = 'report') as own_spent
         from public.lanterns where id = '${L1.id}'`);
     check('auto-hide breaker: reports are recorded but the lantern stays visible',
       rr.every((r) => !r.error) && vis.data?.length === 1 && st.reports === '3' && st.hidden === 'false' && st.no_stamp === 'true' && st.report_rows === '3',
       `${rr.map(msg).join(' | ')} ${JSON.stringify(st)}`);
+    check('report_lantern: reporting your own lantern is a silent no-op that spends no budget',
+      !rr[0].error && st.own_rows === '0' && st.own_spent === '0', `${msg(rr[0])} ${JSON.stringify(st)}`);
+
+    // While the breaker is tripped, only a uid's first lantern of the UTC day is taken. D has
+    // released nothing; A has.
+    const clearBudget = `delete from public.rate_events where kind = 'lantern' and uid in (${list}, '${uidD}');`;
+    sql(clearBudget);
+    const trippedA = await A.rpc('release_lantern', { ...base, p_body: '[test] breaker tripped' });
+    const trippedD = await D.rpc('release_lantern', lanternArgs(B_POS, '[test] breaker tripped, first today'));
+    sql(clearBudget);
+    const trippedD2 = await D.rpc('release_lantern', lanternArgs(B_POS, '[test] breaker tripped, second today'));
+    check('auto-hide breaker tripped: release_lantern raises sky_busy for a uid that released today',
+      trippedA.error?.message === 'sky_busy' && trippedD2.error?.message === 'sky_busy', `${msg(trippedA)} | ${msg(trippedD2)}`);
+    check('auto-hide breaker tripped: a first lantern of the UTC day is still taken', !trippedD.error && !!trippedD.data?.id, msg(trippedD));
+
+    // Catch-up: the next prune hides the lantern the breaker let stand, and announces it.
+    const [cu] = sqlRows(`
+      update public.limits set value = def where key = 'autohide_per_hour';
+      select public._prune();
+      select hidden, hidden_at is not null as stamped,
+             (select count(*) from public.lanterns where seeded and hidden) as seeded_hidden
+        from public.lanterns where id = '${L1.id}'`);
+    const goneL1 = await B.from('lanterns').select('id').eq('id', L1.id);
+    check('_prune catch-up hides a lantern that reached three reports while the breaker was tripped',
+      cu.hidden === 'true' && cu.stamped === 'true' && cu.seeded_hidden === '0' && !goneL1.error && goneL1.data.length === 0, JSON.stringify(cu));
+    const evL1 = await events.wait((e) => e.table === 'broadcast' && e.payload?.id === L1.id);
+    check('realtime: lantern_hidden broadcast for a lantern hidden by _prune catch-up', !!evL1);
+    sql(clearBudget);
+    const calm = await A.rpc('release_lantern', { ...base, p_body: '[test] breaker calm again' });
+    check('auto-hide breaker not tripped: a second lantern of the day is taken again', !calm.error && !!calm.data?.id, msg(calm));
   }
 
   // ── send_wave ─────────────────────────────────────────────────────────────
@@ -642,6 +721,14 @@ async function main() {
       [badTz, far, elsewhere].every((r) => r.error?.message === 'invalid_input'), [badTz, far, elsewhere].map(msg).join(' | '));
     const ab = await wave(A, uidB, A_POS, { p_tz: A_POS.tz });
     check('send_wave A to B (five arguments) returns thread null', !ab.error && ab.data && ab.data.thread === null, msg(ab));
+    {
+      const wB = await B.rpc('my_wavers');
+      const wA = await A.rpc('my_wavers');
+      const wC = await C.rpc('my_wavers');
+      check('my_wavers: the recipient sees the sender uid; sender and bystander see nothing',
+        !wB.error && JSON.stringify(wB.data) === JSON.stringify([uidA]) && !wA.error && Array.isArray(wA.data) && wA.data.length === 0 &&
+        !wC.error && Array.isArray(wC.data) && wC.data.length === 0, `${msg(wB)} | ${msg(wA)} | ${msg(wC)}`);
+    }
 
     // B is a deployed client: four named arguments, the zone comes from its last check_in.
     const ci = await B.rpc('check_in', { p_lat: B_POS.lat, p_lon: B_POS.lon, p_place: B_POS.city, p_tz: B_POS.tz, p_zone: 3 });
@@ -661,6 +748,18 @@ async function main() {
     const ba2 = await wave(B, uidA, B_POS);
     check('a second mutual wave within 24h makes no second thread',
       !ab2.error && ab2.data.thread === null && !ba2.error && ba2.data.thread === null, `${msg(ab2)} | ${msg(ba2)}`);
+    {
+      // Two waves from A are pending for B. The age check runs in a transaction that is never committed.
+      const wB = await B.rpc('my_wavers');
+      const [old] = sqlRows(`
+        begin;
+        update public.waves set created_at = now() - interval '11 minutes' where to_uid = '${uidB}';
+        select set_config('request.jwt.claims', '{"sub":"${uidB}","role":"authenticated"}', true);
+        select (select count(*) from public.waves where to_uid = '${uidB}') as n, auth.uid()::text as me, public.my_wavers()::text as w;`);
+      check('my_wavers: distinct uids, and only waves of the last 10 minutes',
+        !wB.error && JSON.stringify(wB.data) === JSON.stringify([uidA]) && old.n === '2' && old.me === uidB && old.w === '[]',
+        `${msg(wB)} ${JSON.stringify(old)}`);
+    }
     const rows = await C.from('threads').select('id, km, a_place, b_place').eq('id', t?.id);
     check('thread row is readable by a third user', !rows.error && rows.data.length === 1, msg(rows));
     const ev = await events.wait((e) => e.table === 'threads' && e.new?.id === t?.id);
@@ -682,6 +781,27 @@ async function main() {
     check('send_wave: with the limits back, the same pair gets its thread', !ac3.error && !!t2?.id && t2.a_place === C_POS.city, msg(ac3));
     if (t2) { threadsMade++; kmMade += t2.km; }
 
+    // Reserve above the global ceiling. A now has two threads in 24 h; B, C and D have one, one, none.
+    const threadsAtCeiling = `update public.limits set value = (select count(*) from public.threads where created_at > now() - interval '1 hour') where key = 'threads_global_hour';`;
+    sql(threadsAtCeiling);
+    const da = await wave(D, uidA, C_POS, { p_tz: C_POS.tz });
+    const ad = await wave(A, uidD, A_POS, { p_tz: A_POS.tz });
+    check('send_wave: above the global ceiling a uid with two threads in 24 h gets thread null',
+      !da.error && !ad.error && ad.data.thread === null, `${msg(da)} | ${msg(ad)}`);
+    // Hard ceiling at twice the limit (two or more threads in the last hour, limit floor(n / 2)).
+    sql(`update public.limits set value = (select count(*) / 2 from public.threads where created_at > now() - interval '1 hour') where key = 'threads_global_hour';`);
+    const bc = await wave(B, uidC, B_POS, { p_tz: B_POS.tz });
+    const cb = await wave(C, uidB, C_POS, { p_tz: C_POS.tz });
+    check('send_wave: at twice the global ceiling nobody gets a thread', !bc.error && !cb.error && cb.data.thread === null, `${msg(bc)} | ${msg(cb)}`);
+    sql(threadsAtCeiling);
+    const bc2 = await wave(B, uidC, B_POS, { p_tz: B_POS.tz });
+    const t3 = bc2.data?.thread;
+    check('send_wave: above the global ceiling two uids with fewer than two threads still get theirs',
+      !bc2.error && !!t3?.id && t3.a_place === C_POS.city && t3.b_place === B_POS.city, msg(bc2));
+    if (t3) { threadsMade++; kmMade += t3.km; }
+    sql(`update public.limits set value = def where key = 'threads_global_hour';
+         delete from public.rate_events where kind = 'wave' and uid in (${list});`);
+
     const mA = (await A.rpc('my_marks')).data;
     const mB = (await B.rpc('my_marks')).data;
     const mC = (await C.rpc('my_marks')).data;
@@ -691,11 +811,11 @@ async function main() {
     check('world_stats counts the new threads and their km',
       s.threads_total === stats0.threads_total + threadsMade && Math.abs(s.km_total - stats0.km_total - kmMade) <= 2, JSON.stringify(s));
 
-    // Budget: 8 per minute. A has sent one since the reset above, so seven more pass.
+    // Budget: 8 per minute, counted from the reset above.
     const burst = [];
-    for (let i = 0; i < 8; i++) burst.push(await wave(A, uidB, A_POS, { p_tz: A_POS.tz }));
+    for (let i = 0; i < 9; i++) burst.push(await wave(A, uidB, A_POS, { p_tz: A_POS.tz }));
     check('send_wave: eight per minute, the ninth raises rate_limited',
-      burst.slice(0, 7).every((r) => !r.error) && burst[7].error?.message === 'rate_limited', burst.map(msg).join(' | ').slice(0, 300));
+      burst.slice(0, 8).every((r) => !r.error) && burst[8].error?.message === 'rate_limited', burst.map(msg).join(' | ').slice(0, 300));
   }
 
   // ── check_in / world_stats / recent_echoes ────────────────────────────────
@@ -766,12 +886,36 @@ async function main() {
       !e.error && !!row && !('uid' in row) && Object.keys(row).sort().join(',') === 'eid,last_seen,lat,lon,place' &&
       /^[0-9a-f-]{36}$/.test(row.eid) && !uids.includes(row.eid), msg(e));
     check('recent_echoes carries no client-supplied place text', !e.error && !e.data.some((x) => x.place === FORGED));
+    const stamps = (e.data ?? []).map((x) => Date.parse(x.last_seen));
+    check('recent_echoes rounds last_seen down to 10 minutes, newest first',
+      stamps.length > 0 && stamps.every((ms) => ms % 600000 === 0 && ms <= Date.now() + 60000) &&
+      Date.now() - Date.parse(row?.last_seen) < 660000 && stamps.every((ms, i) => i === 0 || ms <= stamps[i - 1]),
+      JSON.stringify((e.data ?? []).slice(0, 5).map((x) => x.last_seen)));
     const anonEchoes = await anon.rpc('recent_echoes');
     check('recent_echoes is readable without a session', !anonEchoes.error && anonEchoes.data.some((x) => x.eid === row?.eid), msg(anonEchoes));
   }
 
   // ── wave_echo / collect_echo_waves ────────────────────────────────────────
   {
+    // A handle lasts one visit: a check_in more than 30 minutes after the last one replaces it.
+    const ci = { p_lat: A_POS.lat, p_lon: A_POS.lon, p_place: FORGED, p_tz: A_POS.tz, p_zone: 0 };
+    const eidOf = () => sqlRows(`select eid from public.echoes where uid = '${uidA}'`)[0]?.eid;
+    const eid0 = eidOf();
+    const c1 = await A.rpc('check_in', ci);
+    const eid1 = eidOf();
+    sql(`update public.echoes set last_seen = now() - interval '31 minutes' where uid = '${uidA}';`);
+    const stale = await B.rpc('recent_echoes');
+    const c2 = await A.rpc('check_in', ci);
+    const eid2 = eidOf();
+    const c3 = await A.rpc('check_in', ci);
+    const eid3 = eidOf();
+    check('check_in keeps the echo eid within 30 minutes and replaces it after',
+      !c1.error && !c2.error && !c3.error && !!eid0 && eid1 === eid0 && eid2 !== eid1 && /^[0-9a-f-]{36}$/.test(eid2) && eid3 === eid2,
+      JSON.stringify({ eid0, eid1, eid2, eid3 }));
+    const gone = await B.rpc('wave_echo', { p_eid: eid1, p_lat: B_POS.lat, p_lon: B_POS.lon, p_tz: B_POS.tz });
+    check('wave_echo to a replaced eid raises not_found',
+      !stale.error && stale.data.some((x) => x.eid === eid1) && gone.error?.message === 'not_found', msg(gone));
+
     const eids = Object.fromEntries(sqlRows(`select uid, eid from public.echoes where uid in (${list})`).map((r) => [r.uid, r.eid]));
     const eA = await A.rpc('recent_echoes');
     const eB = await B.rpc('recent_echoes');
@@ -825,20 +969,29 @@ async function main() {
     check('collect_echo_waves delivers once: the second call returns []',
       !again.error && Array.isArray(again.data) && again.data.length === 0 && leftover.n === '0', `${msg(again)} ${JSON.stringify(leftover)}`);
 
-    // Cap: 40 pending per recipient; the 41st sender is accepted but not stored. Stale rows are
-    // deleted on collect without being returned, and at most 20 come back.
+    // Cap: 40 pending per recipient; the 41st sender replaces the oldest pending row. Stale rows
+    // are deleted on collect without being returned, and at most 20 come back.
     sql(`insert into public.echo_waves (to_uid, from_uid, from_place, from_tz, from_lat, from_lon, created_at)
          select '${uidA}', gen_random_uuid(), 'x' || g, 'Etc/UTC', 0, 0,
                 now() - case when g <= 5 then interval '8 days' else g * interval '1 minute' end
            from generate_series(1, 40) g;`);
     const capped = await we(C, eids[uidA], C_POS);
-    const [cap] = sqlRows(`select count(*) as n, count(*) filter (where from_uid = '${uidC}') as mine from public.echo_waves where to_uid = '${uidA}'`);
-    check('wave_echo: past 40 pending the call succeeds but nothing is stored',
-      !capped.error && capped.data?.ok === true && cap.n === '40' && cap.mine === '0', `${msg(capped)} ${JSON.stringify(cap)}`);
+    const capSql = `select count(*) as n, count(*) filter (where from_uid = '${uidC}') as mine,
+        count(*) filter (where from_place = 'x1') as oldest, count(*) filter (where from_place = 'x2') as second
+        from public.echo_waves where to_uid = '${uidA}'`;
+    const [cap] = sqlRows(capSql);
+    check('wave_echo: at 40 pending the new wave replaces the oldest pending row',
+      !capped.error && capped.data?.ok === true && cap.n === '40' && cap.mine === '1' && cap.oldest === '0' && cap.second === '1',
+      `${msg(capped)} ${JSON.stringify(cap)}`);
+    const capped2 = await we(C, eids[uidA], C_POS);
+    const [cap2] = sqlRows(capSql);
+    check('wave_echo: a repeat from a sender already pending at the cap evicts nothing',
+      !capped2.error && cap2.n === '40' && cap2.mine === '1' && cap2.second === '1', `${msg(capped2)} ${JSON.stringify(cap2)}`);
     const many = await A.rpc('collect_echo_waves');
     const [after] = sqlRows(`select count(*) as n from public.echo_waves where to_uid = '${uidA}'`);
     check('collect_echo_waves returns the newest 20 of the last 7 days and deletes everything',
-      !many.error && many.data.length === 20 && many.data[0].place === 'x6' && many.data[19].place === 'x25' && after.n === '0',
+      !many.error && many.data.length === 20 && many.data[0].place === C_POS.city && many.data[1].place === 'x6' &&
+      many.data[19].place === 'x24' && after.n === '0',
       `${msg(many)} ${JSON.stringify(after)}`);
   }
 
@@ -852,7 +1005,7 @@ async function main() {
   } else {
     let err = '';
     try {
-      cleanup(uids);
+      cleanup(allUids);
     } catch (e) {
       err = String(e.stderr || e.message).slice(0, 300);
     }
@@ -860,10 +1013,11 @@ async function main() {
     const s = (await A.rpc('world_stats')).data;
     const l = await A.from('lanterns').select('id, seeded, body');
     const m = (await A.rpc('my_marks')).data;
+    const list = allUids.map((u) => `'${u}'`).join(',');
     const [left] = sqlRows(`
       select (select count(*) from public.lanterns where uid in (${list}))
            + (select count(*) from public.warmths where uid in (${list}))
-           + (select count(*) from public.reports where uid in (${list}))
+           + (select count(*) from public.reports where uid in (${list}) or uid = '${GHOST}')
            + (select count(*) from public.waves where from_uid in (${list}) or to_uid in (${list}))
            + (select count(*) from public.threads where a_uid in (${list}) or b_uid in (${list}))
            + (select count(*) from public.echoes where uid in (${list}))

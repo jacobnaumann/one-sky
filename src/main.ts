@@ -441,7 +441,9 @@ function renderEchoCard(id: string) {
         feed(rich(['Your wave is waiting in ', { b: e.place }, ' for when they return']));
       } catch (err: any) {
         btn.disabled = false; btn.textContent = 'Leave a wave';
-        note.textContent = String(err?.message).includes('rate_limited') ? 'That’s a lot of waves for one hour. Try again later.' : 'That wave didn’t get through. Try again in a moment.';
+        const msg = String(err?.message);
+        note.textContent = msg.includes('rate_limited') ? 'That’s a lot of waves for one hour. Try again later.' : msg.includes('not_found') ? 'They came back and left again since you looked. Finding them…' : 'That wave didn’t get through. Try again in a moment.';
+        if (msg.includes('not_found')) void refreshWorld();
       }
     });
     actions.append(btn);
