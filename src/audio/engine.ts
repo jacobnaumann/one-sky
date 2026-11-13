@@ -817,11 +817,11 @@ export class AudioEngine {
    */
   private envelope(g: AudioParam, at: number, peak: number, attack: number, hold: number, decay: number, end: number): number {
     const tau = Math.max(0.005, decay / T60);
+    g.setValueAtTime(0, end);
     g.setValueAtTime(0, at);
     if (attack < 0.1) g.linearRampToValueAtTime(peak, at + attack);
     else g.setTargetAtTime(peak, at, attack / 3);
     g.setTargetAtTime(0, at + attack + hold, tau);
-    g.setValueAtTime(0, end);
     return tau;
   }
 

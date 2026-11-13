@@ -11,23 +11,22 @@ and together try to light all 24 time zones in a day.
 
 ## Current state
 
-- 2026-11-13 06:20 UTC — Plan approved. Vault and `CLAUDE.md` created. No code yet.
-- Not deployed.
+- 2026-11-13 07:40 UTC — **Live** at https://jacobnaumann.github.io/one-sky/ (repo `jacobnaumann/one-sky`, Supabase `evktxfawnualbbmoujip`).
+- Working and tested on production: presence, gaze, waves, threads, ripples, lanterns (release/warm/report/translate), 24-zone ring, echoes, drift, postcard, move-my-light, sound engine (levels measured, never listened to).
+- Backend hardened after a security review; visitor data reset to the 6 seeded lanterns.
+- In progress: design critique and client bug hunt by independent reviewers.
 
 ## Open items
 
-- [ ] Scaffold Vite + TypeScript + Three.js project, git init
-- [ ] The Earth: day/night shader from real sun position, city lights, atmosphere, stars, camera
-- [ ] Supabase project, schema, RLS, rate-limited functions
-- [ ] Presence, gaze, waves, threads
-- [ ] Lanterns, daily question, warmth, translation
-- [ ] Daily ring (24 time zones), world stats, echoes
-- [ ] Sound, arrival sequence, postcard
-- [ ] Mobile layout, reduced motion, fallbacks
-- [ ] Deploy to GitHub Pages
-- [ ] Multi-client tests against production
-- [ ] Independent reviews (design, security, code) and fixes
-- [ ] README, final hand-off
+- [x] Scaffold, globe, backend, presence/waves/threads, lanterns, ring, sound, arrival, postcard, mobile
+- [x] Deploy to GitHub Pages; multi-visitor tests on production
+- [x] Security review and fixes
+- [ ] Act on the design critique
+- [ ] Act on the client bug hunt
+- [ ] Act on the measured-audio report
+- [ ] Final reset of test data, final deploy, hand-off summary
+- [ ] After the demo: consider lowering the anonymous sign-in limit back to 30/hour (`supabase/config.toml`)
+- [ ] Someone with speakers should listen to the sound once
 
 ## Map
 
