@@ -29,6 +29,8 @@ npx tsc --noEmit                 # types
 npm test                         # Vitest unit tests (tests/unit)
 npm run e2e                      # Playwright multi-visitor tests against the dev server (must be running)
 ONE_SKY_URL=https://jacobnaumann.github.io/one-sky/ npm run e2e   # same tests against production
+npx playwright test -c playwright.browsers.config.ts   # same e2e tests in Firefox and WebKit
+node scripts/perf.mjs            # real-GPU frame times at several sizes
 node tests/db/rls.test.mjs       # live database policy/RPC checks (needs supabase CLI logged in + linked)
 node scripts/shots.mjs [url]     # visual QA: four visitors, screenshots into test-results/shots
 node scripts/audio-qa.mjs        # measures the sound engine's real output levels

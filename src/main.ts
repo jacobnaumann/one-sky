@@ -786,6 +786,7 @@ function wireSky() {
       for (const p of joined.slice(0, 4)) {
         if (p.id === sky.uid) continue;
         audio.lightJoined(p.lon);
+        globe.ping(p.lat, p.lon);
         feed(rich(['A light appeared in ', { b: p.city }, ` · ${localTimeString(p.tz)} there`]), false, () => { if (sky.people.has(p.id)) select({ type: 'light', id: p.id }); });
       }
       left.forEach((p, i) => {
@@ -1038,6 +1039,8 @@ async function enter() {
     entered = true;
     refreshLights();
     audio.arrive();
+    // your light ignites, and a ring of light goes out from it around the whole Earth
+    if (!reducedMotion) setTimeout(() => globe.ripple(me.lat, me.lon), 500);
     void sky.appear(me).catch(() => {});
     $('offline').hidden = sky.online;
   }, reducedMotion ? 0 : 3000);
@@ -1180,7 +1183,7 @@ function boot() {
   (window as any).__onesky.firstContact = firstContact;
 
   // slow clocks
-  setInterval(() => { renderYou(); rollDay(); if (selection && selection.type === 'light' && !selection.id.startsWith('echo:')) { /* keep their time fresh */ const b = card.querySelector('.facts dd'); const p = sky.people.get(selection.id); if (b && p) { const t = localTimeString(p.tz); if (b.textContent !== t) b.textContent = t; } } }, 15000);
+  setInterval(() => { renderYou(); rollDay(); if (selection && selection.type === 'light' && !selection.id.startsWith('echo:')) { /* keep their time fresh */ const b = card.querySelector('.facts dd'); const p = sky.people.get(selection.id); if (b && p) { const t = localTimeString(p.tz); if (b.textContent !== t) b.textContent = t; const dd = card.querySelectorAll('.facts dd')[3]; const hf = relativeTime(new Date(p.since)).replace(' ago', '').replace('just now', 'a moment'); if (dd && dd.textContent !== hf) dd.textContent = hf; } } }, 15000);
   setInterval(() => void refreshWorld(), 90000);
   setInterval(() => { if (entered) void sky.checkIn().catch(() => {}); }, 10 * 60 * 1000);
 
